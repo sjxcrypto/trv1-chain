@@ -1,0 +1,29 @@
+[package]
+name = "trv1-validator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TRv1 validator node binary"
+
+[[bin]]
+name = "trv1-validator"
+path = "src/main.rs"
+
+[dependencies]
+trv1-bft = { workspace = true }
+trv1-net = { workspace = true }
+trv1-staking = { workspace = true }
+trv1-fees = { workspace = true }
+trv1-rewards = { workspace = true }
+trv1-validator-set = { workspace = true }
+trv1-slashing = { workspace = true }
+trv1-storage = { workspace = true }
+trv1-genesis = { workspace = true }
+trv1-rpc = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = { workspace = true }

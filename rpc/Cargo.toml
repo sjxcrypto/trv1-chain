@@ -1,0 +1,23 @@
+[package]
+name = "trv1-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TRv1 JSON-RPC server"
+
+[dependencies]
+trv1-bft = { workspace = true }
+trv1-staking = { workspace = true }
+trv1-fees = { workspace = true }
+trv1-storage = { workspace = true }
+trv1-validator-set = { workspace = true }
+jsonrpsee = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+ed25519-dalek = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]

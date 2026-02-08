@@ -1,0 +1,18 @@
+[package]
+name = "trv1-validator-set"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TRv1 200-cap validator set management"
+
+[dependencies]
+trv1-staking = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ed25519-dalek = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

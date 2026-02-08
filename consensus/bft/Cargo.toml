@@ -1,0 +1,21 @@
+[package]
+name = "trv1-bft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TRv1 BFT consensus state machine"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

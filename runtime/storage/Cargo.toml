@@ -1,0 +1,21 @@
+[package]
+name = "trv1-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TRv1 tiered storage (RAM LRU → NVMe → cold archive)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+lru = { workspace = true }
+parking_lot = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+tokio = { workspace = true }

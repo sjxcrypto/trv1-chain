@@ -1,0 +1,14 @@
+[package]
+name = "trv1-fees"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TRv1 EIP-1559 fee market with 4-way split"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
