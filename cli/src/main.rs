@@ -36,7 +36,7 @@ enum Commands {
         #[arg(long)]
         amount: u64,
 
-        /// Staking tier name (NoLock, ThreeMonth, SixMonth, OneYear, Permanent)
+        /// Staking tier name (NoLock, 30Day, 90Day, 180Day, 360Day, Delegator, Permanent)
         #[arg(long)]
         tier: String,
     },
@@ -215,40 +215,39 @@ fn cmd_genesis_add_validator(genesis_path: PathBuf, pubkey_hex: &str, stake: u64
 fn cmd_stake(amount: u64, tier_name: &str) {
     let tier = match tier_name.to_lowercase().as_str() {
         "nolock" | "no_lock" | "none" => LockTier::NoLock,
-        "threemonth" | "three_month" | "3month" => LockTier::ThreeMonth,
-        "sixmonth" | "six_month" | "6month" => LockTier::SixMonth,
-        "oneyear" | "one_year" | "1year" => LockTier::OneYear,
+        "30day" | "thirtyday" | "thirty_day" => LockTier::ThirtyDay,
+        "90day" | "ninetyday" | "ninety_day" => LockTier::NinetyDay,
+        "180day" | "oneeightyday" | "one_eighty_day" => LockTier::OneEightyDay,
+        "360day" | "threesixtyday" | "three_sixty_day" => LockTier::ThreeSixtyDay,
+        "delegator" | "delegate" => LockTier::Delegator,
         "permanent" | "perm" => LockTier::Permanent,
         _ => {
             eprintln!("Unknown tier: {tier_name}");
-            eprintln!("Valid tiers: NoLock, ThreeMonth, SixMonth, OneYear, Permanent");
+            eprintln!("Valid tiers: NoLock, 30Day, 90Day, 180Day, 360Day, Delegator, Permanent");
             std::process::exit(1);
         }
     };
 
-    let base_apy = 5.0;
-    let bonus_apy = tier.bonus_apy() * 100.0;
-    let total_apy = base_apy + bonus_apy;
-    let multiplier = tier.multiplier();
+    let base_validator_apy = 5.0; // BASE_APY_BPS = 500 = 5.00%
+    let rate_pct = tier.rate_pct() as f64;
+    let effective_apy = base_validator_apy * rate_pct / 100.0;
     let vote_weight = tier.vote_weight();
 
     let lock_duration = match tier.lock_duration_epochs() {
         Some(0) => "None (instant unlock)".to_string(),
-        Some(d) => format!("{d} epochs (~{} days)", d),
+        Some(d) => format!("{d} epochs (~{d} days)"),
         None => "Permanent (never unlocks)".to_string(),
     };
 
-    let yearly_reward = (amount as f64 * total_apy / 100.0) as u64;
+    let yearly_reward = (amount as f64 * effective_apy / 100.0) as u64;
 
     println!("Staking Information");
     println!("  Amount: {amount}");
     println!("  Tier: {tier_name}");
     println!("  Lock duration: {lock_duration}");
-    println!("  Base APY: {base_apy:.2}%");
-    println!("  Bonus APY: {bonus_apy:.2}%");
-    println!("  Total APY: {total_apy:.2}%");
-    println!("  Reward multiplier: {multiplier:.1}x");
-    println!("  Vote weight: {vote_weight:.1}x");
+    println!("  Rate: {rate_pct:.0}% of validator rate");
+    println!("  Effective APY: {effective_apy:.2}%");
+    println!("  Vote weight: {vote_weight:.2}x");
     println!("  Estimated yearly reward: {yearly_reward}");
 }
 

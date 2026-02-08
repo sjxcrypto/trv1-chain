@@ -1,17 +1,21 @@
 use serde::{Deserialize, Serialize};
 
-/// Lock tier for staked tokens, determining multiplier, bonus APY, and vote weight.
+/// Lock tier for staked tokens, determining rate percentage and vote weight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LockTier {
-    /// No lock period: 1.0x multiplier, 0% bonus, 1.0x vote weight.
+    /// No lock period.
     NoLock,
-    /// 3-month lock: 1.2x multiplier, 1% bonus, 1.5x vote weight.
-    ThreeMonth,
-    /// 6-month lock: 1.5x multiplier, 2% bonus, 2.0x vote weight.
-    SixMonth,
-    /// 1-year lock: 2.0x multiplier, 3% bonus, 3.0x vote weight.
-    OneYear,
-    /// Permanent lock (cannot unstake): 3.0x multiplier, 5% bonus, 5.0x vote weight.
+    /// 30-day lock.
+    ThirtyDay,
+    /// 90-day lock.
+    NinetyDay,
+    /// 180-day lock.
+    OneEightyDay,
+    /// 360-day lock.
+    ThreeSixtyDay,
+    /// Delegator tier.
+    Delegator,
+    /// Permanent lock (cannot unstake).
     Permanent,
 }
 
@@ -19,53 +23,36 @@ pub enum LockTier {
 pub const EPOCHS_PER_YEAR: u64 = 365;
 
 /// Number of epochs in each lock duration.
-pub const THREE_MONTHS_EPOCHS: u64 = 90;
-pub const SIX_MONTHS_EPOCHS: u64 = 180;
-pub const ONE_YEAR_EPOCHS: u64 = 365;
+pub const THIRTY_DAY_EPOCHS: u64 = 30;
+pub const NINETY_DAY_EPOCHS: u64 = 90;
+pub const ONE_EIGHTY_DAY_EPOCHS: u64 = 180;
+pub const THREE_SIXTY_DAY_EPOCHS: u64 = 360;
 
 impl LockTier {
-    /// The reward multiplier as a fixed-point value (x1000 for precision).
-    /// e.g., 1.0x = 1000, 1.2x = 1200, etc.
-    pub fn multiplier_bps(&self) -> u64 {
+    /// Percentage of the base validator rate earned by this tier.
+    pub fn rate_pct(&self) -> u64 {
         match self {
-            LockTier::NoLock => 1000,
-            LockTier::ThreeMonth => 1200,
-            LockTier::SixMonth => 1500,
-            LockTier::OneYear => 2000,
-            LockTier::Permanent => 3000,
+            LockTier::NoLock => 5,
+            LockTier::ThirtyDay => 10,
+            LockTier::NinetyDay => 20,
+            LockTier::OneEightyDay => 30,
+            LockTier::ThreeSixtyDay => 50,
+            LockTier::Delegator => 100,
+            LockTier::Permanent => 120,
         }
-    }
-
-    /// The reward multiplier as f64.
-    pub fn multiplier(&self) -> f64 {
-        self.multiplier_bps() as f64 / 1000.0
-    }
-
-    /// Bonus APY in basis points (100 bps = 1%).
-    pub fn bonus_apy_bps(&self) -> u64 {
-        match self {
-            LockTier::NoLock => 0,
-            LockTier::ThreeMonth => 100,
-            LockTier::SixMonth => 200,
-            LockTier::OneYear => 300,
-            LockTier::Permanent => 500,
-        }
-    }
-
-    /// Bonus APY as f64 (e.g., 0.01 for 1%).
-    pub fn bonus_apy(&self) -> f64 {
-        self.bonus_apy_bps() as f64 / 10_000.0
     }
 
     /// Vote weight multiplier as fixed-point (x1000).
-    /// e.g., 1.0x = 1000, 1.5x = 1500, etc.
+    /// e.g., 0.0x = 0, 0.1x = 100, 1.0x = 1000, 1.5x = 1500.
     pub fn vote_weight_bps(&self) -> u64 {
         match self {
-            LockTier::NoLock => 1000,
-            LockTier::ThreeMonth => 1500,
-            LockTier::SixMonth => 2000,
-            LockTier::OneYear => 3000,
-            LockTier::Permanent => 5000,
+            LockTier::NoLock => 0,
+            LockTier::ThirtyDay => 100,
+            LockTier::NinetyDay => 200,
+            LockTier::OneEightyDay => 300,
+            LockTier::ThreeSixtyDay => 500,
+            LockTier::Delegator => 1000,
+            LockTier::Permanent => 1500,
         }
     }
 
@@ -78,9 +65,11 @@ impl LockTier {
     pub fn lock_duration_epochs(&self) -> Option<u64> {
         match self {
             LockTier::NoLock => Some(0),
-            LockTier::ThreeMonth => Some(THREE_MONTHS_EPOCHS),
-            LockTier::SixMonth => Some(SIX_MONTHS_EPOCHS),
-            LockTier::OneYear => Some(ONE_YEAR_EPOCHS),
+            LockTier::ThirtyDay => Some(THIRTY_DAY_EPOCHS),
+            LockTier::NinetyDay => Some(NINETY_DAY_EPOCHS),
+            LockTier::OneEightyDay => Some(ONE_EIGHTY_DAY_EPOCHS),
+            LockTier::ThreeSixtyDay => Some(THREE_SIXTY_DAY_EPOCHS),
+            LockTier::Delegator => Some(0),
             LockTier::Permanent => None,
         }
     }
@@ -93,75 +82,88 @@ mod tests {
     #[test]
     fn test_no_lock_tier() {
         let tier = LockTier::NoLock;
-        assert_eq!(tier.multiplier_bps(), 1000);
-        assert!((tier.multiplier() - 1.0).abs() < f64::EPSILON);
-        assert_eq!(tier.bonus_apy_bps(), 0);
-        assert!((tier.bonus_apy() - 0.0).abs() < f64::EPSILON);
+        assert_eq!(tier.rate_pct(), 5);
+        assert_eq!(tier.vote_weight_bps(), 0);
+        assert!((tier.vote_weight() - 0.0).abs() < f64::EPSILON);
+        assert_eq!(tier.lock_duration_epochs(), Some(0));
+    }
+
+    #[test]
+    fn test_thirty_day_tier() {
+        let tier = LockTier::ThirtyDay;
+        assert_eq!(tier.rate_pct(), 10);
+        assert_eq!(tier.vote_weight_bps(), 100);
+        assert!((tier.vote_weight() - 0.1).abs() < f64::EPSILON);
+        assert_eq!(tier.lock_duration_epochs(), Some(30));
+    }
+
+    #[test]
+    fn test_ninety_day_tier() {
+        let tier = LockTier::NinetyDay;
+        assert_eq!(tier.rate_pct(), 20);
+        assert_eq!(tier.vote_weight_bps(), 200);
+        assert!((tier.vote_weight() - 0.2).abs() < f64::EPSILON);
+        assert_eq!(tier.lock_duration_epochs(), Some(90));
+    }
+
+    #[test]
+    fn test_one_eighty_day_tier() {
+        let tier = LockTier::OneEightyDay;
+        assert_eq!(tier.rate_pct(), 30);
+        assert_eq!(tier.vote_weight_bps(), 300);
+        assert!((tier.vote_weight() - 0.3).abs() < f64::EPSILON);
+        assert_eq!(tier.lock_duration_epochs(), Some(180));
+    }
+
+    #[test]
+    fn test_three_sixty_day_tier() {
+        let tier = LockTier::ThreeSixtyDay;
+        assert_eq!(tier.rate_pct(), 50);
+        assert_eq!(tier.vote_weight_bps(), 500);
+        assert!((tier.vote_weight() - 0.5).abs() < f64::EPSILON);
+        assert_eq!(tier.lock_duration_epochs(), Some(360));
+    }
+
+    #[test]
+    fn test_delegator_tier() {
+        let tier = LockTier::Delegator;
+        assert_eq!(tier.rate_pct(), 100);
         assert_eq!(tier.vote_weight_bps(), 1000);
         assert!((tier.vote_weight() - 1.0).abs() < f64::EPSILON);
         assert_eq!(tier.lock_duration_epochs(), Some(0));
     }
 
     #[test]
-    fn test_three_month_tier() {
-        let tier = LockTier::ThreeMonth;
-        assert_eq!(tier.multiplier_bps(), 1200);
-        assert!((tier.multiplier() - 1.2).abs() < f64::EPSILON);
-        assert_eq!(tier.bonus_apy_bps(), 100);
-        assert!((tier.bonus_apy() - 0.01).abs() < f64::EPSILON);
-        assert_eq!(tier.vote_weight_bps(), 1500);
-        assert!((tier.vote_weight() - 1.5).abs() < f64::EPSILON);
-        assert_eq!(tier.lock_duration_epochs(), Some(90));
-    }
-
-    #[test]
-    fn test_six_month_tier() {
-        let tier = LockTier::SixMonth;
-        assert_eq!(tier.multiplier_bps(), 1500);
-        assert!((tier.multiplier() - 1.5).abs() < f64::EPSILON);
-        assert_eq!(tier.bonus_apy_bps(), 200);
-        assert!((tier.bonus_apy() - 0.02).abs() < f64::EPSILON);
-        assert_eq!(tier.vote_weight_bps(), 2000);
-        assert!((tier.vote_weight() - 2.0).abs() < f64::EPSILON);
-        assert_eq!(tier.lock_duration_epochs(), Some(180));
-    }
-
-    #[test]
-    fn test_one_year_tier() {
-        let tier = LockTier::OneYear;
-        assert_eq!(tier.multiplier_bps(), 2000);
-        assert!((tier.multiplier() - 2.0).abs() < f64::EPSILON);
-        assert_eq!(tier.bonus_apy_bps(), 300);
-        assert!((tier.bonus_apy() - 0.03).abs() < f64::EPSILON);
-        assert_eq!(tier.vote_weight_bps(), 3000);
-        assert!((tier.vote_weight() - 3.0).abs() < f64::EPSILON);
-        assert_eq!(tier.lock_duration_epochs(), Some(365));
-    }
-
-    #[test]
     fn test_permanent_tier() {
         let tier = LockTier::Permanent;
-        assert_eq!(tier.multiplier_bps(), 3000);
-        assert!((tier.multiplier() - 3.0).abs() < f64::EPSILON);
-        assert_eq!(tier.bonus_apy_bps(), 500);
-        assert!((tier.bonus_apy() - 0.05).abs() < f64::EPSILON);
-        assert_eq!(tier.vote_weight_bps(), 5000);
-        assert!((tier.vote_weight() - 5.0).abs() < f64::EPSILON);
+        assert_eq!(tier.rate_pct(), 120);
+        assert_eq!(tier.vote_weight_bps(), 1500);
+        assert!((tier.vote_weight() - 1.5).abs() < f64::EPSILON);
         assert_eq!(tier.lock_duration_epochs(), None);
     }
 
     #[test]
-    fn test_tiers_ordered_by_multiplier() {
+    fn test_tiers_ordered_by_rate_pct() {
         let tiers = [
             LockTier::NoLock,
-            LockTier::ThreeMonth,
-            LockTier::SixMonth,
-            LockTier::OneYear,
+            LockTier::ThirtyDay,
+            LockTier::NinetyDay,
+            LockTier::OneEightyDay,
+            LockTier::ThreeSixtyDay,
+            LockTier::Delegator,
             LockTier::Permanent,
         ];
         for i in 1..tiers.len() {
-            assert!(tiers[i].multiplier_bps() > tiers[i - 1].multiplier_bps());
-            assert!(tiers[i].vote_weight_bps() > tiers[i - 1].vote_weight_bps());
+            assert!(
+                tiers[i].rate_pct() >= tiers[i - 1].rate_pct(),
+                "rate_pct not non-decreasing at index {}",
+                i
+            );
+            assert!(
+                tiers[i].vote_weight_bps() >= tiers[i - 1].vote_weight_bps(),
+                "vote_weight_bps not non-decreasing at index {}",
+                i
+            );
         }
     }
 }

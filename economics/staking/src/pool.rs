@@ -309,7 +309,7 @@ mod tests {
         pool.stake(key(1), 1_000_000, LockTier::NoLock).unwrap();
         assert_eq!(pool.total_staked(), 1_000_000);
 
-        pool.stake(key(2), 2_000_000, LockTier::ThreeMonth).unwrap();
+        pool.stake(key(2), 2_000_000, LockTier::ThirtyDay).unwrap();
         assert_eq!(pool.total_staked(), 3_000_000);
     }
 
@@ -336,9 +336,9 @@ mod tests {
     #[test]
     fn test_unstake_locked_fails() {
         let mut pool = StakingPool::new();
-        pool.stake(key(1), 1_000_000, LockTier::ThreeMonth).unwrap();
+        pool.stake(key(1), 1_000_000, LockTier::ThirtyDay).unwrap();
 
-        // At epoch 0, the unlock epoch is 90. Cannot unstake yet.
+        // At epoch 0, the unlock epoch is 30. Cannot unstake yet.
         let result = pool.unstake(key(1), 500_000);
         assert!(matches!(result, Err(StakingError::InsufficientBalance { .. })));
     }
@@ -346,9 +346,9 @@ mod tests {
     #[test]
     fn test_unstake_after_lock_expires() {
         let mut pool = StakingPool::new();
-        pool.stake(key(1), 1_000_000, LockTier::ThreeMonth).unwrap();
+        pool.stake(key(1), 1_000_000, LockTier::ThirtyDay).unwrap();
 
-        // Advance to epoch 90 (lock expires).
+        // Advance to epoch 90 (well past 30-day lock expiry).
         pool.set_epoch(90);
         pool.unstake(key(1), 1_000_000).unwrap();
         assert_eq!(pool.total_staked(), 0);
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn test_delegate_locked_undelegate_fails() {
         let mut pool = StakingPool::new();
-        pool.delegate(key(1), key(2), 500_000, LockTier::SixMonth).unwrap();
+        pool.delegate(key(1), key(2), 500_000, LockTier::NinetyDay).unwrap();
 
         let result = pool.undelegate(key(1), key(2), 100_000);
         assert!(matches!(result, Err(StakingError::InsufficientBalance { .. })));
@@ -393,9 +393,9 @@ mod tests {
     #[test]
     fn test_delegate_undelegate_after_lock() {
         let mut pool = StakingPool::new();
-        pool.delegate(key(1), key(2), 500_000, LockTier::SixMonth).unwrap();
+        pool.delegate(key(1), key(2), 500_000, LockTier::NinetyDay).unwrap();
 
-        pool.set_epoch(180);
+        pool.set_epoch(90);
         pool.undelegate(key(1), key(2), 500_000).unwrap();
         assert_eq!(pool.total_staked(), 0);
     }
@@ -420,10 +420,10 @@ mod tests {
         let r1 = rewards.iter().find(|(k, _)| *k == key(1)).unwrap().1;
         let r2 = rewards.iter().find(|(k, _)| *k == key(2)).unwrap().1;
 
-        // NoLock: 1_000_000 * 500 / (10_000 * 365) = 136
-        assert_eq!(r1, 136);
-        // Permanent: 1_000_000 * 1000 / (10_000 * 365) = 273
-        assert_eq!(r2, 273);
+        // NoLock: 1_000_000 * 500 * 5 * 1 / (100 * 10_000 * 365) = 6
+        assert_eq!(r1, 6);
+        // Permanent: 1_000_000 * 500 * 120 * 1 / (100 * 10_000 * 365) = 164
+        assert_eq!(r2, 164);
     }
 
     #[test]
@@ -431,8 +431,8 @@ mod tests {
         let mut pool = StakingPool::new();
         pool.stake(key(1), 1_000_000, LockTier::NoLock).unwrap();
 
-        // 1_000_000 * 1.0 = 1_000_000
-        assert_eq!(pool.get_voting_power(&key(1)), 1_000_000);
+        // NoLock vote_weight_bps = 0, so 1_000_000 * 0 / 1000 = 0
+        assert_eq!(pool.get_voting_power(&key(1)), 0);
     }
 
     #[test]
@@ -440,31 +440,31 @@ mod tests {
         let mut pool = StakingPool::new();
         pool.stake(key(1), 1_000_000, LockTier::Permanent).unwrap();
 
-        // 1_000_000 * 5.0 = 5_000_000
-        assert_eq!(pool.get_voting_power(&key(1)), 5_000_000);
+        // 1_000_000 * 1500 / 1000 = 1_500_000
+        assert_eq!(pool.get_voting_power(&key(1)), 1_500_000);
     }
 
     #[test]
     fn test_voting_power_with_delegations() {
         let mut pool = StakingPool::new();
-        // Validator has own stake.
-        pool.stake(key(1), 1_000_000, LockTier::NoLock).unwrap();
-        // Delegator delegates to validator.
-        pool.delegate(key(2), key(1), 500_000, LockTier::OneYear).unwrap();
+        // Validator stakes with Delegator tier (vote_weight_bps=1000).
+        pool.stake(key(1), 1_000_000, LockTier::Delegator).unwrap();
+        // Delegator delegates to validator with ThreeSixtyDay tier (vote_weight_bps=500).
+        pool.delegate(key(2), key(1), 500_000, LockTier::ThreeSixtyDay).unwrap();
 
-        // Validator power: 1_000_000 * 1.0 + 500_000 * 3.0 = 2_500_000
-        assert_eq!(pool.get_voting_power(&key(1)), 2_500_000);
+        // Validator power: 1_000_000 * 1000/1000 + 500_000 * 500/1000 = 1_250_000
+        assert_eq!(pool.get_voting_power(&key(1)), 1_250_000);
     }
 
     #[test]
     fn test_multiple_stakes_same_staker() {
         let mut pool = StakingPool::new();
         pool.stake(key(1), 500_000, LockTier::NoLock).unwrap();
-        pool.stake(key(1), 500_000, LockTier::ThreeMonth).unwrap();
+        pool.stake(key(1), 500_000, LockTier::ThirtyDay).unwrap();
         assert_eq!(pool.total_staked(), 1_000_000);
 
-        // Voting power: 500_000 * 1.0 + 500_000 * 1.5 = 1_250_000
-        assert_eq!(pool.get_voting_power(&key(1)), 1_250_000);
+        // Voting power: 500_000 * 0/1000 + 500_000 * 100/1000 = 0 + 50_000 = 50_000
+        assert_eq!(pool.get_voting_power(&key(1)), 50_000);
     }
 
     #[test]
@@ -473,14 +473,15 @@ mod tests {
         pool.stake(key(1), 1_000_000, LockTier::NoLock).unwrap();
         pool.unstake(key(1), 300_000).unwrap();
         assert_eq!(pool.total_staked(), 700_000);
-        assert_eq!(pool.get_voting_power(&key(1)), 700_000);
+        // NoLock vote_weight_bps = 0, so 700_000 * 0/1000 = 0
+        assert_eq!(pool.get_voting_power(&key(1)), 0);
     }
 
     #[test]
     fn test_mixed_locked_unlocked_unstake() {
         let mut pool = StakingPool::new();
         pool.stake(key(1), 500_000, LockTier::NoLock).unwrap();
-        pool.stake(key(1), 500_000, LockTier::ThreeMonth).unwrap();
+        pool.stake(key(1), 500_000, LockTier::ThirtyDay).unwrap();
 
         // Can only unstake the NoLock portion.
         pool.unstake(key(1), 500_000).unwrap();

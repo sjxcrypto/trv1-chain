@@ -72,12 +72,19 @@ impl GenesisConfig {
             return Err(GenesisError::ZeroMaxValidators);
         }
 
-        let fee_total = self.chain_params.fee_burn_bps
-            + self.chain_params.fee_validator_bps
-            + self.chain_params.fee_treasury_bps
-            + self.chain_params.fee_developer_bps;
-        if fee_total != 10_000 {
-            return Err(GenesisError::InvalidFeeSplit(fee_total));
+        let launch_total = self.chain_params.fee_launch_burn_bps
+            + self.chain_params.fee_launch_validator_bps
+            + self.chain_params.fee_launch_treasury_bps
+            + self.chain_params.fee_launch_developer_bps;
+        if launch_total != 10_000 {
+            return Err(GenesisError::InvalidFeeSplit(launch_total));
+        }
+        let maturity_total = self.chain_params.fee_maturity_burn_bps
+            + self.chain_params.fee_maturity_validator_bps
+            + self.chain_params.fee_maturity_treasury_bps
+            + self.chain_params.fee_maturity_developer_bps;
+        if maturity_total != 10_000 {
+            return Err(GenesisError::InvalidFeeSplit(maturity_total));
         }
 
         Ok(())
@@ -258,7 +265,7 @@ mod tests {
     #[test]
     fn validate_bad_fee_split_fails() {
         let mut config = GenesisConfig::default_testnet();
-        config.chain_params.fee_burn_bps = 5000;
+        config.chain_params.fee_launch_burn_bps = 5000;
         assert!(matches!(
             config.validate(),
             Err(GenesisError::InvalidFeeSplit(_))

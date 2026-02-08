@@ -17,11 +17,7 @@ impl FeeMarket {
             return Err(FeeError::ZeroElasticity);
         }
         if !config.split.validate() {
-            let sum = config.split.burn_bps
-                + config.split.validator_bps
-                + config.split.treasury_bps
-                + config.split.developer_bps;
-            return Err(FeeError::InvalidSplitRatios(sum));
+            return Err(FeeError::InvalidSplitRatios(0));
         }
         let base_fee = initial_base_fee.max(config.base_fee_floor);
         Ok(Self { config, base_fee })
@@ -191,15 +187,24 @@ mod tests {
     fn test_invalid_split_ratios() {
         let config = FeeConfig {
             split: SplitConfig {
-                burn_bps: 5000,
-                validator_bps: 3000,
-                treasury_bps: 2000,
-                developer_bps: 2000, // Sum = 12000
+                launch: SplitRatios {
+                    burn_bps: 5000,
+                    validator_bps: 3000,
+                    treasury_bps: 2000,
+                    developer_bps: 2000, // Sum = 12000
+                },
+                maturity: SplitRatios {
+                    burn_bps: 2500,
+                    validator_bps: 2500,
+                    treasury_bps: 2500,
+                    developer_bps: 2500,
+                },
+                transition_epochs: 1825,
             },
             ..FeeConfig::default()
         };
         let result = FeeMarket::new(config, 100);
-        assert!(matches!(result, Err(FeeError::InvalidSplitRatios(12000))));
+        assert!(matches!(result, Err(FeeError::InvalidSplitRatios(0))));
     }
 
     #[test]

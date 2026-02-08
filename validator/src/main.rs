@@ -261,7 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Register genesis validators into the staking pool and validator set.
     for gv in &genesis.validators {
         if let Err(e) =
-            staking_pool.stake(gv.pubkey, gv.initial_stake, trv1_staking::LockTier::NoLock)
+            staking_pool.stake(gv.pubkey, gv.initial_stake, trv1_staking::LockTier::Delegator)
         {
             tracing::warn!(
                 pubkey = %to_hex(&gv.pubkey),

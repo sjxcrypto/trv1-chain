@@ -156,66 +156,59 @@ TRv1 implements an EIP-1559 dynamic fee market. The base fee adjusts per block b
 | `base_fee_floor` | 1 | Minimum base fee (never goes below this) |
 | `elasticity_multiplier` | 8 | Fee adjustment denominator (12.5% max change per block) |
 
-### 4-Way Fee Split
+### Transitioning 4-Way Fee Split
 
-All base fees are split into four destinations:
+All base fees are split into four destinations. The ratios linearly transition from launch values to maturity values over `transition_epochs` (default 1825 epochs, ~5 years):
 
-```
-Total Fee
-    |
-    +--- 40% --> Burn (removed from circulation)
-    |
-    +--- 30% --> Block Validator (proposer reward)
-    |
-    +--- 20% --> Protocol Treasury
-    |
-    +--- 10% --> Developer Rewards (contract deployers)
-```
+| Destination | Launch (bps) | Maturity (bps) |
+|-------------|-------------|----------------|
+| Burn | 1000 (10%) | 2500 (25%) |
+| Validator | 0 (0%) | 2500 (25%) |
+| Treasury | 4500 (45%) | 2500 (25%) |
+| Developer | 4500 (45%) | 2500 (25%) |
 
-The split ratios are configurable via `SplitConfig` (in basis points, must sum to 10,000):
+At any epoch, the current ratios are computed by linear interpolation between launch and maturity values. Both launch and maturity ratios must sum to exactly 10,000 bps. Any integer rounding remainder goes to the burn bucket, ensuring the total is always conserved exactly.
 
-| Destination | Default (bps) | Default (%) |
-|-------------|---------------|-------------|
-| Burn | 4000 | 40% |
-| Validator | 3000 | 30% |
-| Treasury | 2000 | 20% |
-| Developer | 1000 | 10% |
-
-Any integer rounding remainder goes to the burn bucket, ensuring the total is always conserved exactly.
+The `SplitConfig` structure holds launch ratios, maturity ratios, and the transition duration. The split ratios at a given epoch are obtained via `split_at_epoch(epoch)`.
 
 ## Staking
 
 ### Base Economics
 
-- **Base APY:** 5% (500 basis points) -- flat per-coin annual yield
+- **Base Validator Rate:** 5% APY (500 basis points)
 - **1 epoch = 1 day** (365 epochs per year)
+- Each tier earns a **percentage of the validator rate** (not a bonus on top)
 
-### Tiered Lock Bonuses (from `economics/staking/src/tiers.rs`)
+### Tiered Rate Model (from `economics/staking/src/tiers.rs`)
 
-Stakers choose a lock tier when staking, trading liquidity for higher rewards:
+Stakers choose a lock tier when staking. Each tier earns a percentage of the base validator rate:
 
-| Tier | Lock Duration | Bonus APY | Total APY | Reward Multiplier | Vote Weight |
-|------|---------------|-----------|-----------|-------------------|-------------|
-| NoLock | 0 epochs (instant) | +0% | 5.00% | 1.0x | 1.0x |
-| ThreeMonth | 90 epochs | +1% | 6.00% | 1.2x | 1.5x |
-| SixMonth | 180 epochs | +2% | 7.00% | 1.5x | 2.0x |
-| OneYear | 365 epochs | +3% | 8.00% | 2.0x | 3.0x |
-| Permanent | Forever | +5% | 10.00% | 3.0x | 5.0x |
+| Tier | Lock Duration | % of Validator Rate | Effective APY | Vote Weight |
+|------|---------------|---------------------|---------------|-------------|
+| NoLock | 0 epochs (instant) | 5% | 0.25% | 0.0x |
+| ThirtyDay | 30 epochs | 10% | 0.50% | 0.1x |
+| NinetyDay | 90 epochs | 20% | 1.00% | 0.2x |
+| OneEightyDay | 180 epochs | 30% | 1.50% | 0.3x |
+| ThreeSixtyDay | 360 epochs | 50% | 2.50% | 0.5x |
+| Delegator | 0 epochs (instant) | 100% | 5.00% | 1.0x |
+| Permanent | Forever | 120% | 6.00% | 1.5x |
 
-The **reward multiplier** scales staking reward calculations. The **vote weight** multiplier scales voting power in consensus and governance.
+The reward formula is: `reward = amount * BASE_APY_BPS * rate_pct * epochs / (100 * 10_000 * 365)`
 
 ### Effective Stake
 
-A validator's effective stake (used for rotation ranking) is:
+A validator's effective stake (used for rotation ranking and proposer selection) is:
 
 ```
 effective_stake = raw_stake * vote_weight_bps / 1000
 ```
 
-For example, a validator with 10,000,000 raw stake in the OneYear tier has:
+For example, a validator with 10,000,000 raw stake in the Delegator tier (vote_weight_bps=1000) has:
 ```
-effective_stake = 10,000,000 * 3000 / 1000 = 30,000,000
+effective_stake = 10,000,000 * 1000 / 1000 = 10,000,000
 ```
+
+Note: The NoLock tier has `vote_weight_bps = 0`, meaning NoLock stakes contribute zero voting power. Genesis validators use the Delegator tier.
 
 ## Validator Set Management
 
@@ -287,10 +280,15 @@ The genesis file is a JSON document that defines the initial chain state.
     "block_time_ms": 2000,
     "max_validators": 200,
     "base_fee_floor": 1,
-    "fee_burn_bps": 4000,
-    "fee_validator_bps": 3000,
-    "fee_treasury_bps": 2000,
-    "fee_developer_bps": 1000,
+    "fee_launch_burn_bps": 1000,
+    "fee_launch_validator_bps": 0,
+    "fee_launch_treasury_bps": 4500,
+    "fee_launch_developer_bps": 4500,
+    "fee_maturity_burn_bps": 2500,
+    "fee_maturity_validator_bps": 2500,
+    "fee_maturity_treasury_bps": 2500,
+    "fee_maturity_developer_bps": 2500,
+    "fee_transition_epochs": 1825,
     "slash_double_sign_bps": 5000,
     "slash_downtime_bps": 100,
     "staking_base_apy": 500

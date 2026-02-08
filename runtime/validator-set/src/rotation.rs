@@ -179,9 +179,9 @@ mod tests {
     #[test]
     fn sort_by_stake_descending() {
         let pool = setup_pool_with_stakes(&[
-            (1, 100, LockTier::NoLock),
-            (2, 300, LockTier::NoLock),
-            (3, 200, LockTier::NoLock),
+            (1, 100, LockTier::Delegator),
+            (2, 300, LockTier::Delegator),
+            (3, 200, LockTier::Delegator),
         ]);
 
         let validators = vec![
@@ -199,9 +199,9 @@ mod tests {
     #[test]
     fn rotation_swaps_stronger_standby_for_weaker_active() {
         let pool = setup_pool_with_stakes(&[
-            (1, 100, LockTier::NoLock),  // active, weakest
-            (2, 200, LockTier::NoLock),  // active
-            (3, 500, LockTier::NoLock),  // standby, strongest
+            (1, 100, LockTier::Delegator),  // active, weakest
+            (2, 200, LockTier::Delegator),  // active
+            (3, 500, LockTier::Delegator),  // standby, strongest
         ]);
 
         let mut validators: HashMap<PublicKey, ValidatorInfo> = HashMap::new();
@@ -222,9 +222,9 @@ mod tests {
     #[test]
     fn rotation_no_swap_when_all_active_stronger() {
         let pool = setup_pool_with_stakes(&[
-            (1, 500, LockTier::NoLock),
-            (2, 300, LockTier::NoLock),
-            (3, 100, LockTier::NoLock),
+            (1, 500, LockTier::Delegator),
+            (2, 300, LockTier::Delegator),
+            (3, 100, LockTier::Delegator),
         ]);
 
         let mut validators: HashMap<PublicKey, ValidatorInfo> = HashMap::new();
@@ -239,8 +239,8 @@ mod tests {
     #[test]
     fn rotation_promotes_standby_when_cap_not_full() {
         let pool = setup_pool_with_stakes(&[
-            (1, 500, LockTier::NoLock),
-            (2, 300, LockTier::NoLock),
+            (1, 500, LockTier::Delegator),
+            (2, 300, LockTier::Delegator),
         ]);
 
         let mut validators: HashMap<PublicKey, ValidatorInfo> = HashMap::new();

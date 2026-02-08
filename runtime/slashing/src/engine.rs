@@ -224,15 +224,15 @@ mod tests {
         let mut pool = StakingPool::new();
 
         // Register validator 1 with 10,000 stake.
-        pool.stake(pubkey(1), 10_000, LockTier::NoLock).unwrap();
+        pool.stake(pubkey(1), 10_000, LockTier::Delegator).unwrap();
         vs.register_validator(pubkey(1), 10_000, 500, 0).unwrap();
 
         // Register validator 2 with 20,000 stake.
-        pool.stake(pubkey(2), 20_000, LockTier::NoLock).unwrap();
+        pool.stake(pubkey(2), 20_000, LockTier::Delegator).unwrap();
         vs.register_validator(pubkey(2), 20_000, 500, 0).unwrap();
 
         // Delegator 3 delegates to validator 1.
-        pool.delegate(pubkey(3), pubkey(1), 5_000, LockTier::NoLock)
+        pool.delegate(pubkey(3), pubkey(1), 5_000, LockTier::Delegator)
             .unwrap();
 
         (engine, vs, pool)

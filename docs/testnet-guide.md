@@ -76,7 +76,9 @@ This creates a genesis file with default chain parameters:
 | Block time | 2000 ms |
 | Max validators | 200 |
 | Base fee floor | 1 |
-| Fee split | 40% burn / 30% validator / 20% treasury / 10% developer |
+| Fee split (launch) | 10% burn / 0% validator / 45% treasury / 45% developer |
+| Fee split (maturity) | 25% burn / 25% validator / 25% treasury / 25% developer |
+| Fee transition | 1825 epochs (~5 years) |
 | Staking base APY | 5% (500 bps) |
 | Double-sign slash | 5% (500 bps) |
 | Downtime slash | 1% (100 bps) |
@@ -299,13 +301,15 @@ Use the CLI to preview staking reward calculations:
 
 ```bash
 trv1 stake --amount 1000000 --tier NoLock
-trv1 stake --amount 1000000 --tier ThreeMonth
-trv1 stake --amount 1000000 --tier SixMonth
-trv1 stake --amount 1000000 --tier OneYear
+trv1 stake --amount 1000000 --tier 30Day
+trv1 stake --amount 1000000 --tier 90Day
+trv1 stake --amount 1000000 --tier 180Day
+trv1 stake --amount 1000000 --tier 360Day
+trv1 stake --amount 1000000 --tier Delegator
 trv1 stake --amount 1000000 --tier Permanent
 ```
 
-Valid tier names (case-insensitive): `NoLock`, `ThreeMonth` (or `3month`), `SixMonth` (or `6month`), `OneYear` (or `1year`), `Permanent` (or `perm`).
+Valid tier names (case-insensitive): `NoLock`, `30Day` (or `ThirtyDay`), `90Day` (or `NinetyDay`), `180Day` (or `OneEightyDay`), `360Day` (or `ThreeSixtyDay`), `Delegator` (or `delegate`), `Permanent` (or `perm`).
 
 ## 8. Stopping the Testnet
 

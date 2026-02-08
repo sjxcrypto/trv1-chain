@@ -370,9 +370,9 @@ mod tests {
     fn epoch_rotation_swaps() {
         let (pool, mut manager) = setup_pool_and_manager(
             &[
-                (1, 100, LockTier::NoLock),   // weakest active
-                (2, 200, LockTier::NoLock),   // active
-                (3, 500, LockTier::NoLock),   // should start standby since cap=2
+                (1, 100, LockTier::Delegator),   // weakest active
+                (2, 200, LockTier::Delegator),   // active
+                (3, 500, LockTier::Delegator),   // should start standby since cap=2
             ],
             2,
         );
@@ -391,8 +391,8 @@ mod tests {
     fn proposer_selection_deterministic() {
         let (pool, manager) = setup_pool_and_manager(
             &[
-                (1, 1000, LockTier::NoLock),
-                (2, 1000, LockTier::NoLock),
+                (1, 1000, LockTier::Delegator),
+                (2, 1000, LockTier::Delegator),
             ],
             10,
         );
@@ -408,8 +408,8 @@ mod tests {
     fn proposer_weighted_distribution() {
         let (pool, manager) = setup_pool_and_manager(
             &[
-                (1, 3000, LockTier::NoLock), // 3000 power
-                (2, 1000, LockTier::NoLock), // 1000 power
+                (1, 3000, LockTier::Delegator), // 3000 power
+                (2, 1000, LockTier::Delegator), // 1000 power
             ],
             10,
         );
@@ -463,9 +463,9 @@ mod tests {
     fn get_active_set_sorted_by_stake() {
         let (pool, manager) = setup_pool_and_manager(
             &[
-                (1, 100, LockTier::NoLock),
-                (2, 300, LockTier::NoLock),
-                (3, 200, LockTier::NoLock),
+                (1, 100, LockTier::Delegator),
+                (2, 300, LockTier::Delegator),
+                (3, 200, LockTier::Delegator),
             ],
             10,
         );
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn rotation_increments_epoch() {
         let (pool, mut manager) = setup_pool_and_manager(
-            &[(1, 1000, LockTier::NoLock)],
+            &[(1, 1000, LockTier::Delegator)],
             10,
         );
 

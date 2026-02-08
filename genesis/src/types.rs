@@ -35,14 +35,24 @@ pub struct ChainParams {
     pub max_validators: usize,
     /// Minimum base fee (EIP-1559 floor).
     pub base_fee_floor: u64,
-    /// Fee split: burn percentage in basis points.
-    pub fee_burn_bps: u64,
-    /// Fee split: validator percentage in basis points.
-    pub fee_validator_bps: u64,
-    /// Fee split: treasury percentage in basis points.
-    pub fee_treasury_bps: u64,
-    /// Fee split: developer percentage in basis points.
-    pub fee_developer_bps: u64,
+    /// Launch fee split: burn percentage in basis points.
+    pub fee_launch_burn_bps: u64,
+    /// Launch fee split: validator percentage in basis points.
+    pub fee_launch_validator_bps: u64,
+    /// Launch fee split: treasury percentage in basis points.
+    pub fee_launch_treasury_bps: u64,
+    /// Launch fee split: developer percentage in basis points.
+    pub fee_launch_developer_bps: u64,
+    /// Maturity fee split: burn percentage in basis points.
+    pub fee_maturity_burn_bps: u64,
+    /// Maturity fee split: validator percentage in basis points.
+    pub fee_maturity_validator_bps: u64,
+    /// Maturity fee split: treasury percentage in basis points.
+    pub fee_maturity_treasury_bps: u64,
+    /// Maturity fee split: developer percentage in basis points.
+    pub fee_maturity_developer_bps: u64,
+    /// Number of epochs to transition from launch to maturity fee split.
+    pub fee_transition_epochs: u64,
     /// Slash percentage for double-signing in basis points.
     pub slash_double_sign_bps: u64,
     /// Slash percentage for downtime in basis points.
@@ -59,10 +69,15 @@ impl Default for ChainParams {
             block_time_ms: 2000,
             max_validators: 200,
             base_fee_floor: 1,
-            fee_burn_bps: 4000,
-            fee_validator_bps: 3000,
-            fee_treasury_bps: 2000,
-            fee_developer_bps: 1000,
+            fee_launch_burn_bps: 1000,
+            fee_launch_validator_bps: 0,
+            fee_launch_treasury_bps: 4500,
+            fee_launch_developer_bps: 4500,
+            fee_maturity_burn_bps: 2500,
+            fee_maturity_validator_bps: 2500,
+            fee_maturity_treasury_bps: 2500,
+            fee_maturity_developer_bps: 2500,
+            fee_transition_epochs: 1825,
             slash_double_sign_bps: 5000,
             slash_downtime_bps: 100,
             staking_base_apy: 500,
@@ -71,10 +86,17 @@ impl Default for ChainParams {
 }
 
 impl ChainParams {
-    /// Validate that fee split ratios sum to 10,000 bps.
+    /// Validate that both launch and maturity fee split ratios sum to 10,000 bps.
     pub fn validate_fee_split(&self) -> bool {
-        self.fee_burn_bps + self.fee_validator_bps + self.fee_treasury_bps + self.fee_developer_bps
-            == 10_000
+        let launch_sum = self.fee_launch_burn_bps
+            + self.fee_launch_validator_bps
+            + self.fee_launch_treasury_bps
+            + self.fee_launch_developer_bps;
+        let maturity_sum = self.fee_maturity_burn_bps
+            + self.fee_maturity_validator_bps
+            + self.fee_maturity_treasury_bps
+            + self.fee_maturity_developer_bps;
+        launch_sum == 10_000 && maturity_sum == 10_000
     }
 }
 
@@ -158,7 +180,13 @@ mod tests {
         let mut params = ChainParams::default();
         assert!(params.validate_fee_split());
 
-        params.fee_burn_bps = 5000;
+        // Breaking launch sum should fail.
+        params.fee_launch_burn_bps = 5000;
+        assert!(!params.validate_fee_split());
+
+        // Fix launch, break maturity.
+        params.fee_launch_burn_bps = 1000;
+        params.fee_maturity_burn_bps = 5000;
         assert!(!params.validate_fee_split());
     }
 
