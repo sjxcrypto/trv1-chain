@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -159,6 +160,46 @@ impl StateDB {
     /// Sum of all account balances.
     pub fn total_supply(&self) -> u64 {
         self.accounts.values().map(|a| a.balance).sum()
+    }
+
+    /// Serialize the state database to JSON and write it to a file.
+    ///
+    /// Account keys (`[u8; 32]`) are stored as hex strings so the output is
+    /// valid JSON with string keys.
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), StateError> {
+        let hex_map: HashMap<String, &AccountState> = self
+            .accounts
+            .iter()
+            .map(|(k, v)| (hex::encode(k), v))
+            .collect();
+
+        let json = serde_json::to_string_pretty(&hex_map).map_err(|e| StateError::Json(e.to_string()))?;
+        std::fs::write(path, json).map_err(|e| StateError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Read a JSON file written by [`save_to_file`](Self::save_to_file) and
+    /// reconstruct a `StateDB` from it.
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, StateError> {
+        let data = std::fs::read_to_string(path).map_err(|e| StateError::Io(e.to_string()))?;
+        let hex_map: HashMap<String, AccountState> =
+            serde_json::from_str(&data).map_err(|e| StateError::Json(e.to_string()))?;
+
+        let mut accounts = HashMap::with_capacity(hex_map.len());
+        for (hex_key, state) in hex_map {
+            let bytes = hex::decode(&hex_key).map_err(|e| StateError::Json(e.to_string()))?;
+            if bytes.len() != 32 {
+                return Err(StateError::Json(format!(
+                    "invalid key length: expected 32 bytes, got {}",
+                    bytes.len()
+                )));
+            }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            accounts.insert(key, state);
+        }
+
+        Ok(Self { accounts })
     }
 
     /// SHA-256 hash of a transaction (used for receipts).
@@ -475,5 +516,110 @@ mod tests {
         db.apply_transfer(&alice(), &bob(), 100, 0).unwrap();
         // Total supply shouldn't change from transfers
         assert_eq!(db.total_supply(), 1500);
+    }
+
+    // --- Persistence tests ---
+
+    /// Helper: create a unique temp file path for persistence tests.
+    fn temp_state_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "trv1_state_test_{}_{}.json",
+            name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        path
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let path = temp_state_path("roundtrip");
+        let db = setup_funded_state();
+
+        db.save_to_file(&path).unwrap();
+        let loaded = StateDB::load_from_file(&path).unwrap();
+
+        // Verify all accounts survived the roundtrip
+        assert_eq!(loaded.account_count(), db.account_count());
+        assert_eq!(loaded.total_supply(), db.total_supply());
+
+        let alice_acct = loaded.get_account(&alice()).unwrap();
+        assert_eq!(alice_acct.balance, 1000);
+        assert_eq!(alice_acct.nonce, 0);
+
+        let bob_acct = loaded.get_account(&bob()).unwrap();
+        assert_eq!(bob_acct.balance, 500);
+        assert_eq!(bob_acct.nonce, 0);
+
+        // State roots must match to ensure deterministic reconstruction
+        assert_eq!(loaded.compute_state_root(), db.compute_state_root());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_nonexistent_file() {
+        let result = StateDB::load_from_file("/tmp/trv1_definitely_does_not_exist.json");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StateError::Io(msg) => assert!(msg.contains("No such file"), "unexpected: {msg}"),
+            other => panic!("expected Io error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_save_load_preserves_nonces() {
+        let path = temp_state_path("nonces");
+
+        let mut db = StateDB::new();
+        db.set_account(alice(), AccountState::new(1000));
+        db.set_account(bob(), AccountState::new(500));
+
+        // Perform some transfers to bump nonces
+        db.apply_transfer(&alice(), &bob(), 100, 0).unwrap();
+        db.apply_transfer(&alice(), &bob(), 50, 1).unwrap();
+        db.apply_transfer(&bob(), &alice(), 25, 0).unwrap();
+
+        // At this point: alice nonce=2, bob nonce=1
+        assert_eq!(db.get_account(&alice()).unwrap().nonce, 2);
+        assert_eq!(db.get_account(&bob()).unwrap().nonce, 1);
+
+        db.save_to_file(&path).unwrap();
+        let loaded = StateDB::load_from_file(&path).unwrap();
+
+        assert_eq!(loaded.get_account(&alice()).unwrap().nonce, 2);
+        assert_eq!(loaded.get_account(&alice()).unwrap().balance, 875);
+        assert_eq!(loaded.get_account(&bob()).unwrap().nonce, 1);
+        assert_eq!(loaded.get_account(&bob()).unwrap().balance, 625);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_save_load_empty_state() {
+        let path = temp_state_path("empty");
+        let db = StateDB::new();
+
+        db.save_to_file(&path).unwrap();
+        let loaded = StateDB::load_from_file(&path).unwrap();
+
+        assert_eq!(loaded.account_count(), 0);
+        assert_eq!(loaded.total_supply(), 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_invalid_json() {
+        let path = temp_state_path("invalid_json");
+        std::fs::write(&path, "this is not json").unwrap();
+
+        let result = StateDB::load_from_file(&path);
+        assert!(matches!(result, Err(StateError::Json(_))));
+
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -18,3 +18,4 @@ ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+rand = { workspace = true }

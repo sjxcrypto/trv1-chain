@@ -15,6 +15,12 @@ pub enum StateError {
 
     #[error("arithmetic overflow")]
     Overflow,
+
+    #[error("I/O error: {0}")]
+    Io(String),
+
+    #[error("JSON error: {0}")]
+    Json(String),
 }
 
 /// Receipt produced after executing a transaction.

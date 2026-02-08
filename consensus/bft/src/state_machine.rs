@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+
+use crate::block::Block;
 use crate::round::{RoundState, RoundStep};
 use crate::types::*;
 
@@ -24,6 +27,8 @@ pub struct BftStateMachine {
     pub valid_round: Option<Round>,
     /// Timeout configuration.
     pub timeout_config: TimeoutConfig,
+    /// Cache of blocks received with proposals, keyed by block hash.
+    pub proposed_blocks: HashMap<BlockHash, Block>,
 }
 
 impl BftStateMachine {
@@ -48,6 +53,7 @@ impl BftStateMachine {
             valid_value: None,
             valid_round: None,
             timeout_config,
+            proposed_blocks: HashMap::new(),
         }
     }
 
@@ -87,8 +93,8 @@ impl BftStateMachine {
         }
     }
 
-    /// Handle an incoming proposal.
-    pub fn on_proposal(&mut self, proposal: &Proposal) -> Vec<ConsensusMessage> {
+    /// Handle an incoming proposal, optionally with the full block data.
+    pub fn on_proposal(&mut self, proposal: &Proposal, block: Option<&Block>) -> Vec<ConsensusMessage> {
         let mut out = Vec::new();
 
         // Validate proposal metadata
@@ -106,6 +112,15 @@ impl BftStateMachine {
         }
         if proposal.proposer != self.validators[expected_idx] {
             return out;
+        }
+
+        // If a block was provided, verify its hash matches the proposal and cache it
+        if let Some(blk) = block {
+            if blk.hash() != proposal.block_hash {
+                // Block hash mismatch — reject this proposal
+                return out;
+            }
+            self.proposed_blocks.insert(proposal.block_hash, blk.clone());
         }
 
         self.round_state.proposal = Some(proposal.block_hash);
@@ -297,6 +312,11 @@ impl BftStateMachine {
         out
     }
 
+    /// Retrieve a cached block by its hash (e.g., after commit).
+    pub fn get_committed_block(&self, hash: &BlockHash) -> Option<&Block> {
+        self.proposed_blocks.get(hash)
+    }
+
     /// Advance to the next height after a commit.
     pub fn advance_height(&mut self, new_height: Height) -> Vec<ConsensusMessage> {
         self.height = new_height;
@@ -304,6 +324,7 @@ impl BftStateMachine {
         self.locked_round = None;
         self.valid_value = None;
         self.valid_round = None;
+        self.proposed_blocks.clear();
         self.start_round(Round(0))
     }
 }
@@ -385,7 +406,7 @@ mod tests {
         let hash = BlockHash([0xAA; 32]);
         // Proposer for height=0, round=0 is index 0
         let proposal = make_proposal(Height(0), Round(0), hash, &keys[0]);
-        let msgs = sm.on_proposal(&proposal);
+        let msgs = sm.on_proposal(&proposal, None);
 
         assert_eq!(sm.step, RoundStep::Prevote);
         assert_eq!(sm.round_state.proposal, Some(hash));
@@ -408,7 +429,7 @@ mod tests {
         let hash = BlockHash([0xBB; 32]);
         // keys[1] is not the proposer for height=0, round=0
         let proposal = make_proposal(Height(0), Round(0), hash, &keys[1]);
-        let msgs = sm.on_proposal(&proposal);
+        let msgs = sm.on_proposal(&proposal, None);
 
         assert!(msgs.is_empty(), "wrong proposer should be ignored");
         assert_eq!(sm.step, RoundStep::Propose);
@@ -606,7 +627,7 @@ mod tests {
 
         // 1. Proposal from validator 0 (the proposer for h=0, r=0)
         let proposal = make_proposal(Height(0), Round(0), hash, &keys[0]);
-        let msgs = sm.on_proposal(&proposal);
+        let msgs = sm.on_proposal(&proposal, None);
         assert_eq!(sm.step, RoundStep::Prevote);
         assert!(!msgs.is_empty());
 
@@ -665,7 +686,7 @@ mod tests {
         let hash_b = BlockHash([0xBB; 32]);
         // Proposer for h=0,r=1 is validator index 1
         let proposal = make_proposal(Height(0), Round(1), hash_b, &keys[1]);
-        let msgs = sm.on_proposal(&proposal);
+        let msgs = sm.on_proposal(&proposal, None);
 
         // Should prevote nil because we're locked on hash_a and proposal has no valid_round
         assert!(!msgs.is_empty());
@@ -707,5 +728,103 @@ mod tests {
                 ..
             })
         )));
+    }
+
+    #[test]
+    fn test_on_proposal_with_block_caches_it() {
+        use crate::block::{Block, BlockHeader, Transaction};
+
+        let (keys, ids) = make_validators(4);
+        let mut sm = BftStateMachine::new(Height(0), ids, Some(1), TimeoutConfig::default());
+        sm.start_round(Round(0));
+
+        let proposer = ValidatorId(keys[0].verifying_key());
+        let txs = vec![Transaction {
+            from: [1u8; 32],
+            to: [2u8; 32],
+            amount: 100,
+            nonce: 0,
+            signature: vec![0u8; 64],
+            data: vec![],
+        }];
+        let block = Block {
+            header: BlockHeader {
+                height: Height(0),
+                timestamp: 1700000000,
+                parent_hash: BlockHash::default(),
+                proposer: proposer.clone(),
+                state_root: [0u8; 32],
+                tx_merkle_root: Block::compute_tx_merkle_root(&txs),
+            },
+            transactions: txs,
+        };
+        let hash = block.hash();
+        let proposal = make_proposal(Height(0), Round(0), hash, &keys[0]);
+
+        let msgs = sm.on_proposal(&proposal, Some(&block));
+        assert!(!msgs.is_empty(), "should have emitted a prevote");
+        assert_eq!(sm.round_state.proposal, Some(hash));
+
+        // Block should be cached
+        let cached = sm.get_committed_block(&hash);
+        assert!(cached.is_some(), "block should be cached after proposal");
+        assert_eq!(cached.unwrap().hash(), hash);
+    }
+
+    #[test]
+    fn test_on_proposal_with_mismatched_block_rejected() {
+        use crate::block::{Block, BlockHeader};
+
+        let (keys, ids) = make_validators(4);
+        let mut sm = BftStateMachine::new(Height(0), ids, Some(1), TimeoutConfig::default());
+        sm.start_round(Round(0));
+
+        let proposer = ValidatorId(keys[0].verifying_key());
+        let block = Block {
+            header: BlockHeader {
+                height: Height(0),
+                timestamp: 1700000000,
+                parent_hash: BlockHash::default(),
+                proposer: proposer.clone(),
+                state_root: [0u8; 32],
+                tx_merkle_root: [0u8; 32],
+            },
+            transactions: vec![],
+        };
+
+        // Proposal claims a different block hash
+        let wrong_hash = BlockHash([0xFF; 32]);
+        let proposal = make_proposal(Height(0), Round(0), wrong_hash, &keys[0]);
+
+        let msgs = sm.on_proposal(&proposal, Some(&block));
+        assert!(msgs.is_empty(), "mismatched block hash should reject the proposal");
+        assert!(sm.round_state.proposal.is_none());
+    }
+
+    #[test]
+    fn test_advance_height_clears_proposed_blocks() {
+        use crate::block::{Block, BlockHeader};
+
+        let (keys, ids) = make_validators(4);
+        let mut sm = BftStateMachine::new(Height(0), ids, Some(1), TimeoutConfig::default());
+
+        let proposer = ValidatorId(keys[0].verifying_key());
+        let block = Block {
+            header: BlockHeader {
+                height: Height(0),
+                timestamp: 1700000000,
+                parent_hash: BlockHash::default(),
+                proposer,
+                state_root: [0u8; 32],
+                tx_merkle_root: [0u8; 32],
+            },
+            transactions: vec![],
+        };
+        let hash = block.hash();
+        sm.proposed_blocks.insert(hash, block);
+        assert!(sm.get_committed_block(&hash).is_some());
+
+        sm.advance_height(Height(1));
+        assert!(sm.proposed_blocks.is_empty(), "proposed_blocks should be cleared on height advance");
     }
 }

@@ -9,12 +9,16 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing;
 use trv1_bft::ConsensusMessage;
+use trv1_bft::block::Transaction;
 
 use crate::codec::{self, NetworkMessage};
 use crate::peer::PeerManager;
 
 /// The gossipsub topic for consensus messages.
 pub const CONSENSUS_TOPIC: &str = "trv1-consensus";
+
+/// The gossipsub topic for transaction gossip.
+pub const TRANSACTION_TOPIC: &str = "trv1-transactions";
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
@@ -55,6 +59,10 @@ pub struct NetworkHandle {
     broadcast_tx: mpsc::Sender<ConsensusMessage>,
     /// Receive inbound messages from the network.
     msg_rx: mpsc::Receiver<NetworkMessage>,
+    /// Send outbound transactions to the swarm runner for gossip publishing.
+    tx_broadcast_tx: mpsc::Sender<Transaction>,
+    /// Receive inbound transactions from the network.
+    tx_msg_rx: mpsc::Receiver<Transaction>,
     local_peer_id: PeerId,
 }
 
@@ -79,21 +87,46 @@ impl NetworkHandle {
     pub async fn next_message(&mut self) -> Option<NetworkMessage> {
         self.msg_rx.recv().await
     }
+
+    /// Broadcast a transaction to all peers via the transaction gossipsub topic.
+    pub async fn broadcast_transaction(&self, tx: &Transaction) -> Result<(), NetworkError> {
+        self.tx_broadcast_tx
+            .send(tx.clone())
+            .await
+            .map_err(|_| NetworkError::ChannelClosed)
+    }
+
+    /// Receive the next inbound transaction from gossip.
+    pub async fn next_transaction(&mut self) -> Option<Transaction> {
+        self.tx_msg_rx.recv().await
+    }
+
+    /// Extract the transaction receiver so it can be polled independently
+    /// (e.g., in a separate `select!` arm without conflicting borrows).
+    pub fn take_tx_receiver(&mut self) -> mpsc::Receiver<Transaction> {
+        let (_, empty_rx) = mpsc::channel(1);
+        std::mem::replace(&mut self.tx_msg_rx, empty_rx)
+    }
 }
 
 /// Owns and drives the libp2p swarm. Spawned as a background task.
 pub struct NetworkRunner {
     swarm: Swarm<gossipsub::Behaviour>,
     topic: IdentTopic,
+    tx_topic: IdentTopic,
     peer_manager: PeerManager,
     /// Receives outbound broadcast requests from `NetworkHandle`s.
     broadcast_rx: mpsc::Receiver<ConsensusMessage>,
     /// Sends inbound messages to `NetworkHandle`.
     msg_tx: mpsc::Sender<NetworkMessage>,
+    /// Receives outbound transaction broadcast requests from `NetworkHandle`s.
+    tx_broadcast_rx: mpsc::Receiver<Transaction>,
+    /// Sends inbound transactions to `NetworkHandle`.
+    tx_msg_tx: mpsc::Sender<Transaction>,
 }
 
 impl NetworkRunner {
-    /// Start listening on the given address and subscribe to the consensus topic.
+    /// Start listening on the given address and subscribe to the consensus and transaction topics.
     pub fn start(&mut self, listen_addr: Multiaddr) -> Result<(), NetworkError> {
         self.swarm
             .listen_on(listen_addr)
@@ -101,6 +134,10 @@ impl NetworkRunner {
         self.swarm
             .behaviour_mut()
             .subscribe(&self.topic)
+            .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
+        self.swarm
+            .behaviour_mut()
+            .subscribe(&self.tx_topic)
             .map_err(|e| NetworkError::Gossipsub(e.to_string()))?;
         tracing::info!("consensus network started");
         Ok(())
@@ -119,8 +156,12 @@ impl NetworkRunner {
     /// Uses `tokio::select!` to simultaneously:
     /// - Poll the swarm for incoming events (messages, connections)
     /// - Receive outbound broadcast requests from `NetworkHandle`s
+    /// - Receive outbound transaction broadcast requests from `NetworkHandle`s
     pub async fn run(mut self) {
         use libp2p::swarm::SwarmEvent;
+
+        let consensus_topic_hash = self.topic.hash();
+        let tx_topic_hash = self.tx_topic.hash();
 
         loop {
             tokio::select! {
@@ -132,26 +173,51 @@ impl NetworkRunner {
                             message,
                             ..
                         }) => {
-                            match codec::decode_consensus_message(&message.data) {
-                                Ok(consensus_msg) => {
-                                    let net_msg = NetworkMessage {
-                                        sender: propagation_source.to_bytes(),
-                                        message: consensus_msg,
-                                    };
-                                    if self.msg_tx.send(net_msg).await.is_err() {
-                                        tracing::warn!("message channel closed, stopping network loop");
-                                        return;
+                            if message.topic == consensus_topic_hash {
+                                match codec::decode_consensus_message(&message.data) {
+                                    Ok(consensus_msg) => {
+                                        let net_msg = NetworkMessage {
+                                            sender: propagation_source.to_bytes(),
+                                            message: consensus_msg,
+                                        };
+                                        if self.msg_tx.send(net_msg).await.is_err() {
+                                            tracing::warn!("consensus message channel closed, stopping network loop");
+                                            return;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            peer = %propagation_source,
+                                            error = %e,
+                                            "failed to decode consensus message"
+                                        );
+                                        self.peer_manager
+                                            .adjust_score(&propagation_source, -10);
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        peer = %propagation_source,
-                                        error = %e,
-                                        "failed to decode consensus message"
-                                    );
-                                    self.peer_manager
-                                        .adjust_score(&propagation_source, -10);
+                            } else if message.topic == tx_topic_hash {
+                                match codec::decode_transaction(&message.data) {
+                                    Ok(tx) => {
+                                        if self.tx_msg_tx.send(tx).await.is_err() {
+                                            tracing::warn!("transaction message channel closed, stopping network loop");
+                                            return;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            peer = %propagation_source,
+                                            error = %e,
+                                            "failed to decode transaction message"
+                                        );
+                                        self.peer_manager
+                                            .adjust_score(&propagation_source, -10);
+                                    }
                                 }
+                            } else {
+                                tracing::debug!(
+                                    topic = ?message.topic,
+                                    "received message on unknown topic"
+                                );
                             }
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
@@ -173,7 +239,7 @@ impl NetworkRunner {
                     }
                 }
 
-                // Receive outbound broadcast requests from handles.
+                // Receive outbound consensus broadcast requests from handles.
                 Some(msg) = self.broadcast_rx.recv() => {
                     match codec::encode_consensus_message(&msg) {
                         Ok(data) => {
@@ -181,11 +247,28 @@ impl NetworkRunner {
                                 .behaviour_mut()
                                 .publish(self.topic.clone(), data)
                             {
-                                tracing::debug!(error = %e, "failed to publish gossipsub message");
+                                tracing::debug!(error = %e, "failed to publish consensus gossipsub message");
                             }
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to encode consensus message for broadcast");
+                        }
+                    }
+                }
+
+                // Receive outbound transaction broadcast requests from handles.
+                Some(tx) = self.tx_broadcast_rx.recv() => {
+                    match codec::encode_transaction(&tx) {
+                        Ok(data) => {
+                            if let Err(e) = self.swarm
+                                .behaviour_mut()
+                                .publish(self.tx_topic.clone(), data)
+                            {
+                                tracing::debug!(error = %e, "failed to publish transaction gossipsub message");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to encode transaction for broadcast");
                         }
                     }
                 }
@@ -238,25 +321,35 @@ impl ConsensusNetwork {
             .build();
 
         let topic = IdentTopic::new(CONSENSUS_TOPIC);
+        let tx_topic = IdentTopic::new(TRANSACTION_TOPIC);
         let peer_manager = PeerManager::new(config.peer_ban_threshold);
 
-        // Channel for inbound messages: runner -> handle
+        // Channel for inbound consensus messages: runner -> handle
         let (msg_tx, msg_rx) = mpsc::channel(256);
-        // Channel for outbound broadcasts: handle -> runner
+        // Channel for outbound consensus broadcasts: handle -> runner
         let (broadcast_tx, broadcast_rx) = mpsc::channel(256);
+        // Channel for inbound transactions: runner -> handle
+        let (tx_msg_tx, tx_msg_rx) = mpsc::channel(256);
+        // Channel for outbound transaction broadcasts: handle -> runner
+        let (tx_broadcast_tx, tx_broadcast_rx) = mpsc::channel(256);
 
         let handle = NetworkHandle {
             broadcast_tx,
             msg_rx,
+            tx_broadcast_tx,
+            tx_msg_rx,
             local_peer_id,
         };
 
         let runner = NetworkRunner {
             swarm,
             topic,
+            tx_topic,
             peer_manager,
             broadcast_rx,
             msg_tx,
+            tx_broadcast_rx,
+            tx_msg_tx,
         };
 
         Ok((handle, runner))
@@ -288,6 +381,11 @@ mod tests {
     #[test]
     fn test_consensus_topic_constant() {
         assert_eq!(CONSENSUS_TOPIC, "trv1-consensus");
+    }
+
+    #[test]
+    fn test_transaction_topic_constant() {
+        assert_eq!(TRANSACTION_TOPIC, "trv1-transactions");
     }
 
     #[test]
@@ -332,5 +430,32 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_tx_broadcast_and_runner_receives() {
+        let keypair = Keypair::generate_ed25519();
+        let config = NetworkConfig::default();
+        let (handle, mut runner) = ConsensusNetwork::new(keypair, config).unwrap();
+
+        let tx = Transaction {
+            from: [1u8; 32],
+            to: [2u8; 32],
+            amount: 500,
+            nonce: 42,
+            signature: vec![0u8; 64],
+            data: vec![10, 20, 30],
+        };
+
+        // Send a transaction through the handle
+        handle.broadcast_transaction(&tx).await.unwrap();
+
+        // The runner's tx_broadcast_rx should receive it
+        let received = runner.tx_broadcast_rx.recv().await.unwrap();
+        assert_eq!(received.from, [1u8; 32]);
+        assert_eq!(received.to, [2u8; 32]);
+        assert_eq!(received.amount, 500);
+        assert_eq!(received.nonce, 42);
+        assert_eq!(received.data, vec![10, 20, 30]);
     }
 }

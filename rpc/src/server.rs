@@ -5,6 +5,8 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::server::ServerBuilder;
 use jsonrpsee::types::ErrorObjectOwned;
 use parking_lot::RwLock;
+use tokio::sync::mpsc;
+use trv1_bft::block::Transaction;
 use trv1_mempool::TransactionPool;
 use trv1_state::StateDB;
 
@@ -34,6 +36,9 @@ pub struct RpcState {
     pub block_store: Arc<RwLock<Vec<BlockResponse>>>,
     /// Real validator info populated from the genesis config.
     pub genesis_validators: Arc<Vec<ValidatorResponse>>,
+    /// Channel for sending newly submitted transactions to the P2P gossip layer.
+    /// The validator event loop reads from the corresponding receiver.
+    pub tx_gossip_tx: Option<mpsc::Sender<Transaction>>,
 }
 
 impl RpcState {
@@ -51,7 +56,14 @@ impl RpcState {
             state_db,
             block_store: Arc::new(RwLock::new(Vec::new())),
             genesis_validators: Arc::new(genesis_validators),
+            tx_gossip_tx: None,
         }
+    }
+
+    /// Set the transaction gossip channel sender.
+    pub fn with_tx_gossip(mut self, tx: mpsc::Sender<Transaction>) -> Self {
+        self.tx_gossip_tx = Some(tx);
+        self
     }
 
     /// Create a mock RPC state for testing (empty mempool, state, and no validators).
@@ -213,12 +225,19 @@ impl Trv1ApiServer for RpcImpl {
 
         let tx_hash = hex::encode(trv1_mempool::pool::compute_tx_hash(&tx));
 
+        let tx_clone = tx.clone();
         let mut mempool = self.state.mempool.write();
         match mempool.add_transaction(tx) {
-            Ok(()) => Ok(SubmitTransactionResponse {
-                tx_hash,
-                accepted: true,
-            }),
+            Ok(()) => {
+                // Gossip the accepted transaction to the P2P network
+                if let Some(ref gossip_tx) = self.state.tx_gossip_tx {
+                    let _ = gossip_tx.try_send(tx_clone);
+                }
+                Ok(SubmitTransactionResponse {
+                    tx_hash,
+                    accepted: true,
+                })
+            }
             Err(e) => Err(ErrorObjectOwned::owned(
                 -32000,
                 format!("transaction rejected: {e}"),

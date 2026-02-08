@@ -183,7 +183,7 @@ fn process_bft_output(
             ConsensusMessage::CommitBlock { .. } => {
                 to_broadcast.push(msg);
             }
-            ConsensusMessage::ProposeBlock(_) => {
+            ConsensusMessage::ProposeBlock { .. } => {
                 to_broadcast.push(msg);
             }
         }
@@ -310,16 +310,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let rpc_state = Arc::new(RpcState::new(
-        Arc::new(parking_lot::RwLock::new(trv1_mempool::TransactionPool::new(
-            trv1_mempool::MempoolConfig::default(),
-        ))),
-        Arc::new(parking_lot::RwLock::new(StateDB::new())),
-        genesis_validators,
-    ));
+    // Channel for tx gossip: RPC submissions → event loop → P2P broadcast
+    let (tx_gossip_tx, mut tx_gossip_rx) = mpsc::channel::<Transaction>(256);
 
-    // Populate StateDB from genesis accounts
-    {
+    let rpc_state = Arc::new(
+        RpcState::new(
+            Arc::new(parking_lot::RwLock::new(trv1_mempool::TransactionPool::new(
+                trv1_mempool::MempoolConfig::default(),
+            ))),
+            Arc::new(parking_lot::RwLock::new(StateDB::new())),
+            genesis_validators,
+        )
+        .with_tx_gossip(tx_gossip_tx),
+    );
+
+    // Try to load persisted state, otherwise populate from genesis accounts
+    let state_file = args.data_dir.join("state.json");
+    if state_file.exists() {
+        match StateDB::load_from_file(&state_file) {
+            Ok(loaded) => {
+                let mut db = rpc_state.state_db.write();
+                *db = loaded;
+                tracing::info!(
+                    accounts = db.account_count(),
+                    total_supply = db.total_supply(),
+                    "state database restored from {}", state_file.display()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load state file, falling back to genesis");
+                let mut db = rpc_state.state_db.write();
+                for acct in &genesis.accounts {
+                    db.set_account(acct.pubkey, AccountState::new(acct.balance));
+                }
+                tracing::info!(
+                    accounts = db.account_count(),
+                    total_supply = db.total_supply(),
+                    "state database initialized from genesis"
+                );
+            }
+        }
+    } else {
         let mut db = rpc_state.state_db.write();
         for acct in &genesis.accounts {
             db.set_account(acct.pubkey, AccountState::new(acct.balance));
@@ -453,6 +484,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn the swarm event loop as a background task
     tokio::spawn(runner.run());
 
+    // Extract the transaction receiver so we can poll it independently in select!
+    let mut net_tx_rx = handle.take_tx_receiver();
+
     // --- Wrap remaining mutable state ---
     let fee_market = Arc::new(std::sync::RwLock::new(fee_market));
     let staking_pool = Arc::new(std::sync::RwLock::new(staking_pool));
@@ -507,8 +541,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proposing block"
             );
 
+            // Feed the proposal into our own BFT state machine
+            bft.on_proposal(&proposal, Some(&block));
+
             if let Err(e) = handle
-                .broadcast_message(&ConsensusMessage::ProposeBlock(proposal))
+                .broadcast_message(&ConsensusMessage::ProposeBlock {
+                    proposal,
+                    block: Some(block),
+                })
                 .await
             {
                 tracing::warn!(error = %e, "failed to broadcast proposal");
@@ -547,14 +587,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
 
                         let bft_outputs = match net_msg.message {
-                            ConsensusMessage::ProposeBlock(proposal) => {
+                            ConsensusMessage::ProposeBlock { proposal, block } => {
                                 tracing::debug!(
                                     height = proposal.height.0,
                                     round = proposal.round.0,
                                     proposer = %to_hex(proposal.proposer.as_bytes()),
+                                    has_block = block.is_some(),
                                     "received proposal"
                                 );
-                                bft.on_proposal(&proposal)
+                                bft.on_proposal(&proposal, block.as_ref())
                             }
                             ConsensusMessage::CastVote(ref vote) => {
                                 match vote.vote_type {
@@ -582,9 +623,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     block_hash = %to_hex(&block_hash.0),
                                     "received commit block from network"
                                 );
+                                let committed_block = bft.get_committed_block(&block_hash).cloned();
                                 apply_commit(
                                     height,
                                     block_hash,
+                                    committed_block.as_ref(),
                                     &rpc_state,
                                     &fee_market,
                                     &mut last_block_hash,
@@ -607,6 +650,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(ref sk) = signing_key {
                                         propose_block(
                                             &handle,
+                                            &mut bft,
                                             sk,
                                             next_height,
                                             Round(0),
@@ -646,9 +690,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "committing block"
                                     );
 
+                                    let committed_block = bft.get_committed_block(block_hash).cloned();
                                     apply_commit(
                                         *height,
                                         *block_hash,
+                                        committed_block.as_ref(),
                                         &rpc_state,
                                         &fee_market,
                                         &mut last_block_hash,
@@ -671,6 +717,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(ref sk) = signing_key {
                                             propose_block(
                                                 &handle,
+                                                &mut bft,
                                                 sk,
                                                 next_height,
                                                 Round(0),
@@ -717,11 +764,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             && timeout_event.step == TimeoutStep::Precommit
                         {
                             if let Some(ref sk) = signing_key {
+                                let h = bft.height;
+                                let r = bft.round;
                                 propose_block(
                                     &handle,
+                                    &mut bft,
                                     sk,
-                                    bft.height,
-                                    bft.round,
+                                    h,
+                                    r,
                                     last_block_hash,
                                     &rpc_state,
                                 ).await;
@@ -731,9 +781,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for msg in &broadcasts {
                             match msg {
                                 ConsensusMessage::CommitBlock { height, block_hash } => {
+                                    let committed_block = bft.get_committed_block(block_hash).cloned();
                                     apply_commit(
                                         *height,
                                         *block_hash,
+                                        committed_block.as_ref(),
                                         &rpc_state,
                                         &fee_market,
                                         &mut last_block_hash,
@@ -756,6 +808,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(ref sk) = signing_key {
                                             propose_block(
                                                 &handle,
+                                                &mut bft,
                                                 sk,
                                                 next_height,
                                                 Round(0),
@@ -779,6 +832,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+
+                    // Receive gossiped transactions from other nodes.
+                    Some(tx) = net_tx_rx.recv() => {
+                        tracing::debug!(
+                            from = %to_hex(&tx.from),
+                            to = %to_hex(&tx.to),
+                            amount = tx.amount,
+                            nonce = tx.nonce,
+                            "received gossiped transaction"
+                        );
+
+                        match rpc_state.mempool.write().add_transaction(tx) {
+                            Ok(_) => {
+                                tracing::debug!("gossiped transaction added to mempool");
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "rejected gossiped transaction");
+                            }
+                        }
+                    }
+
+                    // Broadcast locally submitted transactions (from RPC) to P2P network.
+                    Some(tx) = tx_gossip_rx.recv() => {
+                        if let Err(e) = handle.broadcast_transaction(&tx).await {
+                            tracing::debug!(error = %e, "failed to gossip transaction to network");
+                        }
+                    }
                 }
             }
         } => {}
@@ -789,14 +869,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Persist state to disk before exiting
+    {
+        let db = rpc_state.state_db.read();
+        if let Err(e) = db.save_to_file(&state_file) {
+            tracing::error!(error = %e, "failed to save state to disk");
+        } else {
+            tracing::info!(
+                accounts = db.account_count(),
+                path = %state_file.display(),
+                "state saved to disk"
+            );
+        }
+    }
+
     tracing::info!("TRv1 Validator shutting down gracefully");
     Ok(())
 }
 
 /// Apply a committed block: execute transactions, update mempool, update RPC state.
+///
+/// `committed_block` is the actual block from the BFT proposal cache. If available,
+/// we use its transactions instead of blindly pulling from the mempool — this ensures
+/// we execute exactly the transactions the proposer included.
 fn apply_commit(
     height: Height,
     block_hash: BlockHash,
+    committed_block: Option<&Block>,
     rpc_state: &Arc<RpcState>,
     fee_market: &Arc<std::sync::RwLock<FeeMarket>>,
     last_block_hash: &mut BlockHash,
@@ -805,8 +904,17 @@ fn apply_commit(
     _developer_rewards: &Arc<std::sync::RwLock<DeveloperRewards>>,
     validator_set: &Arc<std::sync::RwLock<ValidatorSetManager>>,
 ) {
-    // Get pending transactions and apply them to state
-    let txs = rpc_state.mempool.read().get_pending_ordered(100);
+    // Use the committed block's transactions if available, else fall back to mempool
+    let (txs, proposer_hex) = match committed_block {
+        Some(block) => {
+            let proposer = to_hex(block.header.proposer.as_bytes());
+            (block.transactions.clone(), proposer)
+        }
+        None => {
+            let txs = rpc_state.mempool.read().get_pending_ordered(100);
+            (txs, String::new())
+        }
+    };
 
     let receipts = {
         let mut db = rpc_state.state_db.write();
@@ -848,7 +956,7 @@ fn apply_commit(
         height: height.0,
         timestamp: now_secs(),
         parent_hash: to_hex(&last_block_hash.0),
-        proposer: "".to_string(), // TODO: wire in actual proposer pubkey
+        proposer: proposer_hex,
         tx_count: txs.len(),
         block_hash: to_hex(&block_hash.0),
     });
@@ -876,8 +984,12 @@ fn apply_commit(
 }
 
 /// Propose a new block as the round's designated proposer.
+///
+/// Also feeds the proposal into the local BFT state machine so the proposer
+/// caches its own block for later retrieval on commit.
 async fn propose_block(
     handle: &NetworkHandle,
+    bft: &mut BftStateMachine,
     signing_key: &SigningKey,
     height: Height,
     round: Round,
@@ -904,8 +1016,14 @@ async fn propose_block(
         "proposing block"
     );
 
+    // Feed into local BFT so it caches the block
+    bft.on_proposal(&proposal, Some(&block));
+
     if let Err(e) = handle
-        .broadcast_message(&ConsensusMessage::ProposeBlock(proposal))
+        .broadcast_message(&ConsensusMessage::ProposeBlock {
+            proposal,
+            block: Some(block),
+        })
         .await
     {
         tracing::warn!(error = %e, "failed to broadcast proposal");

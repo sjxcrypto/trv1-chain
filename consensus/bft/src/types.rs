@@ -1,6 +1,8 @@
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+use crate::block::Block;
+
 /// Wrapper around an ed25519 public key identifying a validator.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ValidatorId(pub VerifyingKey);
@@ -68,7 +70,10 @@ pub struct Proposal {
 /// Messages produced and consumed by the BFT state machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConsensusMessage {
-    ProposeBlock(Proposal),
+    ProposeBlock {
+        proposal: Proposal,
+        block: Option<Block>,
+    },
     CastVote(Vote),
     CommitBlock {
         height: Height,
