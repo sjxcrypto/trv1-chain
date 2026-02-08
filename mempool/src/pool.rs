@@ -5,7 +5,7 @@ use tracing::debug;
 use trv1_bft::block::Transaction;
 
 use crate::types::{MempoolConfig, MempoolError, PendingTransaction};
-use crate::validation::validate_transaction;
+use crate::validation::{validate_transaction, verify_signature};
 
 /// Transaction pool storing pending transactions awaiting inclusion in a block.
 #[derive(Debug)]
@@ -34,6 +34,9 @@ impl TransactionPool {
     pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), MempoolError> {
         // Basic structural validation
         validate_transaction(&tx)?;
+
+        // Cryptographic signature verification
+        verify_signature(&tx)?;
 
         // Check pool capacity
         if self.total_count >= self.config.max_size {
@@ -148,7 +151,7 @@ mod tests {
             to,
             amount,
             nonce,
-            signature: vec![0u8; 64], // dummy sig for pool tests
+            signature: vec![0u8; 64], // dummy sig for non-pool tests (hashing, structural rejection)
             data: vec![],
         }
     }
@@ -191,7 +194,8 @@ mod tests {
     #[test]
     fn test_add_and_count() {
         let mut pool = default_pool();
-        let tx = make_tx([1u8; 32], [2u8; 32], 100, 0);
+        let sk = SigningKey::generate(&mut OsRng);
+        let tx = make_real_signed_tx(&sk, [2u8; 32], 100, 0);
         assert!(pool.add_transaction(tx).is_ok());
         assert_eq!(pool.pending_count(), 1);
     }
@@ -199,7 +203,8 @@ mod tests {
     #[test]
     fn test_dedup_detection() {
         let mut pool = default_pool();
-        let tx = make_tx([1u8; 32], [2u8; 32], 100, 0);
+        let sk = SigningKey::generate(&mut OsRng);
+        let tx = make_real_signed_tx(&sk, [2u8; 32], 100, 0);
         assert!(pool.add_transaction(tx.clone()).is_ok());
         let err = pool.add_transaction(tx).unwrap_err();
         assert_eq!(err, MempoolError::DuplicateTransaction);
@@ -209,12 +214,16 @@ mod tests {
     #[test]
     fn test_pool_full() {
         let mut pool = small_pool();
-        pool.add_transaction(make_tx([1u8; 32], [2u8; 32], 100, 0)).unwrap();
-        pool.add_transaction(make_tx([2u8; 32], [3u8; 32], 200, 0)).unwrap();
-        pool.add_transaction(make_tx([3u8; 32], [4u8; 32], 300, 0)).unwrap();
+        let sk1 = SigningKey::generate(&mut OsRng);
+        let sk2 = SigningKey::generate(&mut OsRng);
+        let sk3 = SigningKey::generate(&mut OsRng);
+        let sk4 = SigningKey::generate(&mut OsRng);
+        pool.add_transaction(make_real_signed_tx(&sk1, [2u8; 32], 100, 0)).unwrap();
+        pool.add_transaction(make_real_signed_tx(&sk2, [3u8; 32], 200, 0)).unwrap();
+        pool.add_transaction(make_real_signed_tx(&sk3, [4u8; 32], 300, 0)).unwrap();
 
         let err = pool
-            .add_transaction(make_tx([4u8; 32], [5u8; 32], 400, 0))
+            .add_transaction(make_real_signed_tx(&sk4, [5u8; 32], 400, 0))
             .unwrap_err();
         assert_eq!(err, MempoolError::PoolFull);
     }
@@ -222,13 +231,13 @@ mod tests {
     #[test]
     fn test_per_account_limit() {
         let mut pool = small_pool();
-        let sender = [1u8; 32];
-        pool.add_transaction(make_tx(sender, [2u8; 32], 100, 0)).unwrap();
-        pool.add_transaction(make_tx(sender, [2u8; 32], 200, 1)).unwrap();
+        let sk = SigningKey::generate(&mut OsRng);
+        pool.add_transaction(make_real_signed_tx(&sk, [2u8; 32], 100, 0)).unwrap();
+        pool.add_transaction(make_real_signed_tx(&sk, [2u8; 32], 200, 1)).unwrap();
 
         // Third tx from same sender exceeds per-account limit of 2
         let err = pool
-            .add_transaction(make_tx(sender, [2u8; 32], 300, 2))
+            .add_transaction(make_real_signed_tx(&sk, [2u8; 32], 300, 2))
             .unwrap_err();
         assert_eq!(err, MempoolError::PoolFull);
     }
@@ -236,9 +245,12 @@ mod tests {
     #[test]
     fn test_ordering_by_priority() {
         let mut pool = default_pool();
-        pool.add_transaction(make_tx([1u8; 32], [2u8; 32], 10, 0)).unwrap();
-        pool.add_transaction(make_tx([2u8; 32], [3u8; 32], 500, 0)).unwrap();
-        pool.add_transaction(make_tx([3u8; 32], [4u8; 32], 100, 0)).unwrap();
+        let sk1 = SigningKey::generate(&mut OsRng);
+        let sk2 = SigningKey::generate(&mut OsRng);
+        let sk3 = SigningKey::generate(&mut OsRng);
+        pool.add_transaction(make_real_signed_tx(&sk1, [2u8; 32], 10, 0)).unwrap();
+        pool.add_transaction(make_real_signed_tx(&sk2, [3u8; 32], 500, 0)).unwrap();
+        pool.add_transaction(make_real_signed_tx(&sk3, [4u8; 32], 100, 0)).unwrap();
 
         let ordered = pool.get_pending_ordered(10);
         assert_eq!(ordered.len(), 3);
@@ -250,9 +262,12 @@ mod tests {
     #[test]
     fn test_ordering_max_count() {
         let mut pool = default_pool();
-        pool.add_transaction(make_tx([1u8; 32], [2u8; 32], 10, 0)).unwrap();
-        pool.add_transaction(make_tx([2u8; 32], [3u8; 32], 500, 0)).unwrap();
-        pool.add_transaction(make_tx([3u8; 32], [4u8; 32], 100, 0)).unwrap();
+        let sk1 = SigningKey::generate(&mut OsRng);
+        let sk2 = SigningKey::generate(&mut OsRng);
+        let sk3 = SigningKey::generate(&mut OsRng);
+        pool.add_transaction(make_real_signed_tx(&sk1, [2u8; 32], 10, 0)).unwrap();
+        pool.add_transaction(make_real_signed_tx(&sk2, [3u8; 32], 500, 0)).unwrap();
+        pool.add_transaction(make_real_signed_tx(&sk3, [4u8; 32], 100, 0)).unwrap();
 
         let ordered = pool.get_pending_ordered(2);
         assert_eq!(ordered.len(), 2);
@@ -263,7 +278,8 @@ mod tests {
     #[test]
     fn test_contains() {
         let mut pool = default_pool();
-        let tx = make_tx([1u8; 32], [2u8; 32], 100, 0);
+        let sk = SigningKey::generate(&mut OsRng);
+        let tx = make_real_signed_tx(&sk, [2u8; 32], 100, 0);
         let hash = compute_tx_hash(&tx);
         assert!(!pool.contains(&hash));
         pool.add_transaction(tx).unwrap();
@@ -273,8 +289,10 @@ mod tests {
     #[test]
     fn test_remove_committed() {
         let mut pool = default_pool();
-        let tx1 = make_tx([1u8; 32], [2u8; 32], 100, 0);
-        let tx2 = make_tx([2u8; 32], [3u8; 32], 200, 0);
+        let sk1 = SigningKey::generate(&mut OsRng);
+        let sk2 = SigningKey::generate(&mut OsRng);
+        let tx1 = make_real_signed_tx(&sk1, [2u8; 32], 100, 0);
+        let tx2 = make_real_signed_tx(&sk2, [3u8; 32], 200, 0);
         let hash1 = compute_tx_hash(&tx1);
         let hash2 = compute_tx_hash(&tx2);
 
@@ -291,8 +309,10 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut pool = default_pool();
-        pool.add_transaction(make_tx([1u8; 32], [2u8; 32], 100, 0)).unwrap();
-        pool.add_transaction(make_tx([2u8; 32], [3u8; 32], 200, 0)).unwrap();
+        let sk1 = SigningKey::generate(&mut OsRng);
+        let sk2 = SigningKey::generate(&mut OsRng);
+        pool.add_transaction(make_real_signed_tx(&sk1, [2u8; 32], 100, 0)).unwrap();
+        pool.add_transaction(make_real_signed_tx(&sk2, [3u8; 32], 200, 0)).unwrap();
         assert_eq!(pool.pending_count(), 2);
 
         pool.clear();
@@ -314,6 +334,16 @@ mod tests {
         tx.signature = vec![]; // empty
         let err = pool.add_transaction(tx).unwrap_err();
         assert!(matches!(err, MempoolError::InvalidTransaction(_)));
+    }
+
+    #[test]
+    fn test_reject_invalid_signature() {
+        let mut pool = default_pool();
+        let sk = SigningKey::generate(&mut OsRng);
+        let mut tx = make_real_signed_tx(&sk, [2u8; 32], 100, 0);
+        tx.amount = 999; // tamper with transaction after signing
+        let err = pool.add_transaction(tx).unwrap_err();
+        assert_eq!(err, MempoolError::InvalidSignature);
     }
 
     #[test]
@@ -343,7 +373,8 @@ mod tests {
     #[test]
     fn test_remove_nonexistent_is_noop() {
         let mut pool = default_pool();
-        pool.add_transaction(make_tx([1u8; 32], [2u8; 32], 100, 0)).unwrap();
+        let sk = SigningKey::generate(&mut OsRng);
+        pool.add_transaction(make_real_signed_tx(&sk, [2u8; 32], 100, 0)).unwrap();
         let fake_hash = [0xffu8; 32];
         pool.remove_committed(&[fake_hash]);
         assert_eq!(pool.pending_count(), 1);

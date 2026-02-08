@@ -23,30 +23,45 @@ pub struct RpcState {
     pub mempool: Arc<RwLock<TransactionPool>>,
     /// Account state database.
     pub state_db: Arc<RwLock<StateDB>>,
+    /// Committed blocks indexed by height (index 0 = genesis / height 0).
+    ///
+    /// The validator binary should push new blocks after each commit:
+    /// ```ignore
+    /// rpc_state.block_store.write().push(block_response);
+    /// ```
+    /// This should be called in the `apply_commit` function right after updating
+    /// `current_height`, so that `block_store.len() == current_height + 1`.
+    pub block_store: Arc<RwLock<Vec<BlockResponse>>>,
+    /// Real validator info populated from the genesis config.
+    pub genesis_validators: Arc<Vec<ValidatorResponse>>,
 }
 
 impl RpcState {
-    /// Create a new RPC state with the given mempool and state database.
+    /// Create a new RPC state with the given mempool, state database, and genesis validators.
     pub fn new(
         mempool: Arc<RwLock<TransactionPool>>,
         state_db: Arc<RwLock<StateDB>>,
+        genesis_validators: Vec<ValidatorResponse>,
     ) -> Self {
         Self {
             current_height: Arc::new(RwLock::new(0)),
-            validator_count: Arc::new(RwLock::new(0)),
+            validator_count: Arc::new(RwLock::new(genesis_validators.len())),
             base_fee: Arc::new(RwLock::new(1)),
             mempool,
             state_db,
+            block_store: Arc::new(RwLock::new(Vec::new())),
+            genesis_validators: Arc::new(genesis_validators),
         }
     }
 
-    /// Create a mock RPC state for testing (empty mempool and state).
+    /// Create a mock RPC state for testing (empty mempool, state, and no validators).
     pub fn new_mock() -> Self {
         Self::new(
             Arc::new(RwLock::new(TransactionPool::new(
                 trv1_mempool::MempoolConfig::default(),
             ))),
             Arc::new(RwLock::new(StateDB::new())),
+            Vec::new(),
         )
     }
 }
@@ -95,36 +110,51 @@ struct RpcImpl {
 
 impl Trv1ApiServer for RpcImpl {
     fn get_block(&self, height: u64) -> RpcResult<BlockResponse> {
+        let store = self.state.block_store.read();
+        if let Some(block) = store.get(height as usize) {
+            return Ok(block.clone());
+        }
+        // No block stored at this height -- return a genesis-style placeholder.
         let current = *self.state.current_height.read();
+        if height > current {
+            return Err(ErrorObjectOwned::owned(
+                -32001,
+                format!("block at height {height} not yet committed (current: {current})"),
+                None::<()>,
+            ));
+        }
+        // Height is within range but not in store (shouldn't happen once wiring
+        // is complete). Return a zero placeholder for backwards compatibility.
         Ok(BlockResponse {
             height,
             timestamp: 0,
             parent_hash: "0".repeat(64),
             proposer: "0".repeat(64),
             tx_count: 0,
-            block_hash: format!(
-                "placeholder_block_hash_at_height_{height}_current_{current}"
-            ),
+            block_hash: "0".repeat(64),
         })
     }
 
     fn get_latest_block(&self) -> RpcResult<BlockResponse> {
+        let store = self.state.block_store.read();
+        if let Some(block) = store.last() {
+            return Ok(block.clone());
+        }
+        drop(store);
+        // No blocks stored yet -- return genesis placeholder at current height.
         let height = *self.state.current_height.read();
-        self.get_block(height)
+        Ok(BlockResponse {
+            height,
+            timestamp: 0,
+            parent_hash: "0".repeat(64),
+            proposer: "0".repeat(64),
+            tx_count: 0,
+            block_hash: "0".repeat(64),
+        })
     }
 
     fn get_validators(&self) -> RpcResult<Vec<ValidatorResponse>> {
-        let count = *self.state.validator_count.read();
-        let validators: Vec<ValidatorResponse> = (0..count)
-            .map(|i| ValidatorResponse {
-                pubkey: format!("validator_{i}_pubkey"),
-                stake: 10_000_000,
-                commission_rate: 500,
-                status: "Active".to_string(),
-                performance_score: 10_000,
-            })
-            .collect();
-        Ok(validators)
+        Ok(self.state.genesis_validators.as_ref().clone())
     }
 
     fn get_staking_info(&self, pubkey: String) -> RpcResult<StakingInfoResponse> {
@@ -256,32 +286,123 @@ mod tests {
     }
 
     #[test]
-    fn rpc_impl_get_block() {
-        let rpc = mock_rpc();
-        let resp = rpc.get_block(10).unwrap();
-        assert_eq!(resp.height, 10);
+    fn rpc_impl_get_block_from_store() {
+        let state = Arc::new(RpcState::new_mock());
+        // Populate the block store with a block at height 0.
+        state.block_store.write().push(BlockResponse {
+            height: 0,
+            timestamp: 1700000000,
+            parent_hash: "0".repeat(64),
+            proposer: "aa".repeat(32),
+            tx_count: 2,
+            block_hash: "bb".repeat(32),
+        });
+        *state.current_height.write() = 0;
+
+        let rpc = RpcImpl { state: state.clone() };
+        let resp = rpc.get_block(0).unwrap();
+        assert_eq!(resp.height, 0);
+        assert_eq!(resp.tx_count, 2);
+        assert_eq!(resp.proposer, "aa".repeat(32));
     }
 
     #[test]
-    fn rpc_impl_get_latest_block() {
+    fn rpc_impl_get_block_future_height_error() {
+        let rpc = mock_rpc();
+        // Height 10 has not been committed; current_height is 0.
+        let resp = rpc.get_block(10);
+        assert!(resp.is_err());
+    }
+
+    #[test]
+    fn rpc_impl_get_block_placeholder_fallback() {
+        // When current_height is set but block_store is empty (backwards compat)
+        let state = Arc::new(RpcState::new_mock());
+        *state.current_height.write() = 5;
+        let rpc = RpcImpl { state };
+        let resp = rpc.get_block(3).unwrap();
+        assert_eq!(resp.height, 3);
+        assert_eq!(resp.block_hash, "0".repeat(64));
+    }
+
+    #[test]
+    fn rpc_impl_get_latest_block_from_store() {
+        let state = Arc::new(RpcState::new_mock());
+        state.block_store.write().push(BlockResponse {
+            height: 0,
+            timestamp: 100,
+            parent_hash: "0".repeat(64),
+            proposer: "aa".repeat(32),
+            tx_count: 1,
+            block_hash: "cc".repeat(32),
+        });
+        state.block_store.write().push(BlockResponse {
+            height: 1,
+            timestamp: 200,
+            parent_hash: "cc".repeat(32),
+            proposer: "bb".repeat(32),
+            tx_count: 3,
+            block_hash: "dd".repeat(32),
+        });
+        *state.current_height.write() = 1;
+
+        let rpc = RpcImpl { state };
+        let resp = rpc.get_latest_block().unwrap();
+        assert_eq!(resp.height, 1);
+        assert_eq!(resp.tx_count, 3);
+        assert_eq!(resp.block_hash, "dd".repeat(32));
+    }
+
+    #[test]
+    fn rpc_impl_get_latest_block_empty_store() {
         let state = Arc::new(RpcState::new_mock());
         *state.current_height.write() = 99;
-        let rpc = RpcImpl {
-            state: state.clone(),
-        };
+        let rpc = RpcImpl { state };
         let resp = rpc.get_latest_block().unwrap();
+        // Falls back to placeholder at current height.
         assert_eq!(resp.height, 99);
+        assert_eq!(resp.block_hash, "0".repeat(64));
     }
 
     #[test]
-    fn rpc_impl_get_validators() {
-        let state = Arc::new(RpcState::new_mock());
-        *state.validator_count.write() = 3;
-        let rpc = RpcImpl {
-            state: state.clone(),
-        };
+    fn rpc_impl_get_validators_from_genesis() {
+        let validators = vec![
+            ValidatorResponse {
+                pubkey: "aa".repeat(32),
+                stake: 1_000_000,
+                commission_rate: 500,
+                status: "Active".to_string(),
+                performance_score: 10_000,
+            },
+            ValidatorResponse {
+                pubkey: "bb".repeat(32),
+                stake: 2_000_000,
+                commission_rate: 300,
+                status: "Active".to_string(),
+                performance_score: 9_500,
+            },
+        ];
+        let state = Arc::new(RpcState::new(
+            Arc::new(RwLock::new(TransactionPool::new(
+                trv1_mempool::MempoolConfig::default(),
+            ))),
+            Arc::new(RwLock::new(StateDB::new())),
+            validators.clone(),
+        ));
+        let rpc = RpcImpl { state };
         let resp = rpc.get_validators().unwrap();
-        assert_eq!(resp.len(), 3);
+        assert_eq!(resp.len(), 2);
+        assert_eq!(resp[0].pubkey, "aa".repeat(32));
+        assert_eq!(resp[0].stake, 1_000_000);
+        assert_eq!(resp[1].pubkey, "bb".repeat(32));
+        assert_eq!(resp[1].stake, 2_000_000);
+    }
+
+    #[test]
+    fn rpc_impl_get_validators_empty() {
+        let rpc = mock_rpc();
+        let resp = rpc.get_validators().unwrap();
+        assert!(resp.is_empty());
     }
 
     #[test]

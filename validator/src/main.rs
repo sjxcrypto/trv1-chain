@@ -18,9 +18,10 @@ use trv1_fees::{FeeConfig, FeeMarket};
 use trv1_genesis::GenesisConfig;
 
 use trv1_net::network::NetworkConfig;
-use trv1_net::ConsensusNetwork;
+use trv1_net::{ConsensusNetwork, NetworkHandle};
 use trv1_rewards::DeveloperRewards;
 use trv1_rpc::server::{RpcServer, RpcState};
+use trv1_rpc::types::{BlockResponse, ValidatorResponse};
 use trv1_slashing::SlashingEngine;
 use trv1_staking::StakingPool;
 use trv1_state::{AccountState, StateDB};
@@ -296,10 +297,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let slashing_engine = SlashingEngine::new();
     tracing::info!("slashing engine initialized");
 
-    // --- Create RPC state with shared mempool and state DB ---
-    // RpcState::new_mock() creates internal parking_lot::RwLock-wrapped mempool and state_db.
-    // We populate them through the RpcState's public fields to avoid importing parking_lot directly.
-    let rpc_state = Arc::new(RpcState::new_mock());
+    // --- Create RPC state with shared mempool, state DB, and real genesis validators ---
+    let genesis_validators: Vec<ValidatorResponse> = genesis
+        .validators
+        .iter()
+        .map(|gv| ValidatorResponse {
+            pubkey: to_hex(&gv.pubkey),
+            stake: gv.initial_stake,
+            commission_rate: gv.commission_rate,
+            status: "Active".to_string(),
+            performance_score: 10_000,
+        })
+        .collect();
+
+    let rpc_state = Arc::new(RpcState::new(
+        Arc::new(parking_lot::RwLock::new(trv1_mempool::TransactionPool::new(
+            trv1_mempool::MempoolConfig::default(),
+        ))),
+        Arc::new(parking_lot::RwLock::new(StateDB::new())),
+        genesis_validators,
+    ));
 
     // Populate StateDB from genesis accounts
     {
@@ -397,17 +414,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..NetworkConfig::default()
     };
 
-    let mut network = ConsensusNetwork::new(libp2p_keypair, net_config).unwrap_or_else(|e| {
-        tracing::error!(error = %e, "failed to create consensus network");
-        std::process::exit(1);
-    });
+    let (mut handle, mut runner) =
+        ConsensusNetwork::new(libp2p_keypair, net_config).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "failed to create consensus network");
+            std::process::exit(1);
+        });
 
     tracing::info!(
-        peer_id = %network.local_peer_id(),
+        peer_id = %handle.local_peer_id(),
         "P2P network created"
     );
 
-    network.start(listen_addr).unwrap_or_else(|e| {
+    runner.start(listen_addr).unwrap_or_else(|e| {
         tracing::error!(error = %e, "failed to start P2P listener");
         std::process::exit(1);
     });
@@ -420,7 +438,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         match peer_addr_str.parse::<Multiaddr>() {
             Ok(addr) => {
-                if let Err(e) = network.dial(addr.clone()) {
+                if let Err(e) = runner.dial(addr.clone()) {
                     tracing::warn!(addr = %addr, error = %e, "failed to dial peer");
                 } else {
                     tracing::info!(addr = %addr, "dialing peer");
@@ -431,6 +449,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    // Spawn the swarm event loop as a background task
+    tokio::spawn(runner.run());
 
     // --- Wrap remaining mutable state ---
     let fee_market = Arc::new(std::sync::RwLock::new(fee_market));
@@ -486,7 +507,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proposing block"
             );
 
-            if let Err(e) = network.broadcast_message(&ConsensusMessage::ProposeBlock(proposal)) {
+            if let Err(e) = handle
+                .broadcast_message(&ConsensusMessage::ProposeBlock(proposal))
+                .await
+            {
                 tracing::warn!(error = %e, "failed to broadcast proposal");
             }
         }
@@ -494,7 +518,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Broadcast any initial messages
     for msg in &broadcasts {
-        if let Err(e) = network.broadcast_message(msg) {
+        if let Err(e) = handle.broadcast_message(msg).await {
             tracing::debug!(error = %e, "failed to broadcast initial message");
         }
     }
@@ -516,7 +540,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 tokio::select! {
                     // Receive messages from the P2P network.
-                    net_msg = network.next_message() => {
+                    net_msg = handle.next_message() => {
                         let Some(net_msg) = net_msg else {
                             tracing::warn!("network message channel closed");
                             break;
@@ -582,18 +606,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if bft.is_proposer() {
                                     if let Some(ref sk) = signing_key {
                                         propose_block(
-                                            &mut network,
+                                            &handle,
                                             sk,
                                             next_height,
                                             Round(0),
                                             last_block_hash,
                                             &rpc_state,
-                                        );
+                                        ).await;
                                     }
                                 }
 
                                 for msg in &inner_broadcasts {
-                                    if let Err(e) = network.broadcast_message(msg) {
+                                    if let Err(e) = handle.broadcast_message(msg).await {
                                         tracing::debug!(error = %e, "failed to broadcast");
                                     }
                                 }
@@ -646,24 +670,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if bft.is_proposer() {
                                         if let Some(ref sk) = signing_key {
                                             propose_block(
-                                                &mut network,
+                                                &handle,
                                                 sk,
                                                 next_height,
                                                 Round(0),
                                                 last_block_hash,
                                                 &rpc_state,
-                                            );
+                                            ).await;
                                         }
                                     }
 
                                     for adv_msg in &advance_broadcasts {
-                                        if let Err(e) = network.broadcast_message(adv_msg) {
+                                        if let Err(e) = handle.broadcast_message(adv_msg).await {
                                             tracing::debug!(error = %e, "failed to broadcast");
                                         }
                                     }
                                 }
                                 _ => {
-                                    if let Err(e) = network.broadcast_message(msg) {
+                                    if let Err(e) = handle.broadcast_message(msg).await {
                                         tracing::debug!(error = %e, "failed to broadcast");
                                     }
                                 }
@@ -694,13 +718,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             if let Some(ref sk) = signing_key {
                                 propose_block(
-                                    &mut network,
+                                    &handle,
                                     sk,
                                     bft.height,
                                     bft.round,
                                     last_block_hash,
                                     &rpc_state,
-                                );
+                                ).await;
                             }
                         }
 
@@ -731,24 +755,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if bft.is_proposer() {
                                         if let Some(ref sk) = signing_key {
                                             propose_block(
-                                                &mut network,
+                                                &handle,
                                                 sk,
                                                 next_height,
                                                 Round(0),
                                                 last_block_hash,
                                                 &rpc_state,
-                                            );
+                                            ).await;
                                         }
                                     }
 
                                     for adv_msg in &advance_broadcasts {
-                                        if let Err(e) = network.broadcast_message(adv_msg) {
+                                        if let Err(e) = handle.broadcast_message(adv_msg).await {
                                             tracing::debug!(error = %e, "failed to broadcast");
                                         }
                                     }
                                 }
                                 _ => {
-                                    if let Err(e) = network.broadcast_message(msg) {
+                                    if let Err(e) = handle.broadcast_message(msg).await {
                                         tracing::debug!(error = %e, "failed to broadcast");
                                     }
                                 }
@@ -819,6 +843,16 @@ fn apply_commit(
     *rpc_state.current_height.write() = height.0;
     *rpc_state.base_fee.write() = fee_market.read().unwrap().current_base_fee();
 
+    // Store committed block for RPC queries
+    rpc_state.block_store.write().push(BlockResponse {
+        height: height.0,
+        timestamp: now_secs(),
+        parent_hash: to_hex(&last_block_hash.0),
+        proposer: "".to_string(), // TODO: wire in actual proposer pubkey
+        tx_count: txs.len(),
+        block_hash: to_hex(&block_hash.0),
+    });
+
     // Update last block hash
     *last_block_hash = block_hash;
 
@@ -842,8 +876,8 @@ fn apply_commit(
 }
 
 /// Propose a new block as the round's designated proposer.
-fn propose_block(
-    network: &mut ConsensusNetwork,
+async fn propose_block(
+    handle: &NetworkHandle,
     signing_key: &SigningKey,
     height: Height,
     round: Round,
@@ -870,7 +904,10 @@ fn propose_block(
         "proposing block"
     );
 
-    if let Err(e) = network.broadcast_message(&ConsensusMessage::ProposeBlock(proposal)) {
+    if let Err(e) = handle
+        .broadcast_message(&ConsensusMessage::ProposeBlock(proposal))
+        .await
+    {
         tracing::warn!(error = %e, "failed to broadcast proposal");
     }
 }
