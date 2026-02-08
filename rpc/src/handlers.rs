@@ -32,4 +32,12 @@ pub trait Trv1Api {
     /// Health check endpoint.
     #[method(name = "trv1_health")]
     fn health(&self) -> RpcResult<HealthResponse>;
+
+    /// Submit a signed transaction to the mempool.
+    #[method(name = "trv1_submitTransaction")]
+    fn submit_transaction(&self, tx: SubmitTransactionRequest) -> RpcResult<SubmitTransactionResponse>;
+
+    /// Get account state by public key (hex string).
+    #[method(name = "trv1_getAccount")]
+    fn get_account(&self, pubkey: String) -> RpcResult<AccountResponse>;
 }

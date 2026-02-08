@@ -1,0 +1,19 @@
+[package]
+name = "trv1-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TRv1 account state management"
+
+[dependencies]
+trv1-bft = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

@@ -18,6 +18,8 @@ trv1-rewards = { workspace = true }
 trv1-validator-set = { workspace = true }
 trv1-slashing = { workspace = true }
 trv1-storage = { workspace = true }
+trv1-state = { workspace = true }
+trv1-mempool = { workspace = true }
 trv1-genesis = { workspace = true }
 trv1-rpc = { workspace = true }
 tokio = { workspace = true }
@@ -27,3 +29,7 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ed25519-dalek = { workspace = true }
+libp2p = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }

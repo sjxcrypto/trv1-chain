@@ -46,6 +46,43 @@ pub struct HealthResponse {
     pub version: String,
 }
 
+/// Request to submit a transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitTransactionRequest {
+    /// Sender public key as hex string (64 hex chars = 32 bytes).
+    pub from: String,
+    /// Recipient public key as hex string.
+    pub to: String,
+    /// Transfer amount.
+    pub amount: u64,
+    /// Sender nonce.
+    pub nonce: u64,
+    /// ed25519 signature as hex string (128 hex chars = 64 bytes).
+    pub signature: String,
+    /// Arbitrary data as hex string.
+    pub data: String,
+}
+
+/// Response after submitting a transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitTransactionResponse {
+    /// Transaction hash as hex string.
+    pub tx_hash: String,
+    /// Whether the transaction was accepted into the mempool.
+    pub accepted: bool,
+}
+
+/// Response for an account query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountResponse {
+    /// Public key as hex string.
+    pub pubkey: String,
+    /// Account balance.
+    pub balance: u64,
+    /// Account nonce.
+    pub nonce: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +130,48 @@ mod tests {
         let resp2: ValidatorResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp.stake, resp2.stake);
         assert_eq!(resp.status, resp2.status);
+    }
+
+    #[test]
+    fn submit_tx_request_serde() {
+        let req = SubmitTransactionRequest {
+            from: "aa".repeat(32),
+            to: "bb".repeat(32),
+            amount: 100,
+            nonce: 0,
+            signature: "cc".repeat(64),
+            data: String::new(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let req2: SubmitTransactionRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req.from, req2.from);
+        assert_eq!(req.amount, req2.amount);
+        assert_eq!(req.signature, req2.signature);
+    }
+
+    #[test]
+    fn submit_tx_response_serde() {
+        let resp = SubmitTransactionResponse {
+            tx_hash: "dd".repeat(32),
+            accepted: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let resp2: SubmitTransactionResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp.tx_hash, resp2.tx_hash);
+        assert!(resp2.accepted);
+    }
+
+    #[test]
+    fn account_response_serde() {
+        let resp = AccountResponse {
+            pubkey: "ee".repeat(32),
+            balance: 1_000_000,
+            nonce: 5,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let resp2: AccountResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp.pubkey, resp2.pubkey);
+        assert_eq!(resp.balance, resp2.balance);
+        assert_eq!(resp.nonce, resp2.nonce);
     }
 }
